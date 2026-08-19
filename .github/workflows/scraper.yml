@@ -18,8 +18,22 @@ on:
     - cron: '0 6 * * *'
 
   # Botón manual: pestaña Actions > este workflow > "Run workflow".
-  # Úsalo para la primera prueba en lugar de esperar a mañana.
+  # Al pulsarlo aparecen dos opciones para hacer pruebas sin tocar código.
   workflow_dispatch:
+    inputs:
+      modo:
+        description: 'Modo: normal escribe en Supabase, diagnostico no toca nada'
+        required: true
+        default: 'normal'
+        type: choice
+        options:
+          - normal
+          - diagnostico
+      cpv_prefijos:
+        description: 'Prefijos CPV solo para esta ejecución (vacío = los de siempre)'
+        required: false
+        default: ''
+        type: string
 
 # Solo lectura del repositorio. Al no haber commits automáticos,
 # el robot no necesita permiso de escritura sobre el código.
@@ -51,7 +65,8 @@ jobs:
       #   Para afinar a espectáculo en vivo: '92312,9234,79953,79952100'
       #   Para cambiar de sector entero, sustituye la lista completa.
       # Si borras esta línea, el script usa sus valores de serie.
-      CPV_PREFIJOS: '7995,923,925'
+      # Si en el botón manual escribes prefijos, mandan esos; si no, estos.
+      CPV_PREFIJOS: ${{ inputs.cpv_prefijos || '7995,923,925' }}
 
     steps:
       - name: Descargar el código del repositorio
@@ -79,7 +94,7 @@ jobs:
 
       - name: Ejecutar el scraper
         id: scraper
-        run: python lector_atom.py
+        run: python lector_atom.py ${{ inputs.modo == 'diagnostico' && '--diagnostico' || '' }}
 
       - name: Comprobar que el repositorio sigue limpio
         run: |
