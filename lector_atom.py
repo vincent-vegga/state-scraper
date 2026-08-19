@@ -47,6 +47,7 @@ import os
 import re
 import sys
 import time
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterator, Sequence
 
@@ -872,6 +873,47 @@ def formatear_importe(valor: float | None) -> str:
     return f"{valor:,.2f}".replace(",", "@").replace(".", ",").replace("@", ".") + " EUR"
 
 
+def informar_cobertura(licitaciones: list[dict[str, Any]]) -> None:
+    """
+    Mide qué porcentaje de las licitaciones trae cada dato clave.
+
+    Sirve para decidir con números, y no por intuición, si un campo es
+    utilizable como filtro de producto. Un campo presente en el 30 % de
+    los casos no sostiene una funcionalidad de cara al cliente.
+    """
+    total = len(licitaciones)
+    if not total:
+        logging.info("Sin licitaciones que medir.")
+        return
+
+    logging.info("--- COBERTURA DE DATOS (sobre %d licitaciones) ---", total)
+    medidas = (
+        ("Código postal", sum(1 for x in licitaciones if x["codigo_postal"])),
+        ("Presupuesto", sum(1 for x in licitaciones if x["presupuesto"] is not None)),
+        ("Órgano", sum(1 for x in licitaciones if not x["organo"].startswith("("))),
+        ("Expediente", sum(1 for x in licitaciones if x["expediente"])),
+    )
+    for etiqueta, presentes in medidas:
+        logging.info("  %-16s %4d/%-4d (%5.1f %%)",
+                     etiqueta, presentes, total, 100 * presentes / total)
+
+    # Reparto del volumen entre los prefijos CPV configurados: responde a
+    # "¿cuánto de mi ruido viene de cada familia?" sin salir del registro.
+    logging.info("--- VOLUMEN POR PREFIJO CPV ---")
+    for prefijo in CPV_PREFIJOS:
+        n = sum(1 for x in licitaciones
+                if any(c.startswith(prefijo) for c in x["cpvs"]))
+        logging.info("  %-10s %4d  (%5.1f %%)", prefijo, n, 100 * n / total)
+
+    provincias = Counter(
+        x["codigo_postal"][:2] for x in licitaciones if x["codigo_postal"]
+    )
+    if provincias:
+        reparto = ", ".join(f"{p}: {n}" for p, n in provincias.most_common(12))
+        logging.info("--- PROVINCIAS MÁS FRECUENTES (2 primeros dígitos del CP) ---")
+        logging.info("  %s", reparto)
+
+
 def mostrar_resumen(licitaciones: list[dict[str, Any]]) -> None:
     """Imprime un resumen legible en el registro de la ejecución."""
     if not licitaciones:
@@ -966,6 +1008,7 @@ def main() -> int:
     if opciones.diagnostico:
         logging.info("MODO DIAGNÓSTICO: %d licitaciones coincidirían con el filtro.",
                      len(candidatas))
+        informar_cobertura(candidatas)
         mostrar_resumen(candidatas[:15])
         logging.info("No se ha consultado ni modificado Supabase.")
         return 0
