@@ -663,6 +663,21 @@ def obtener_cliente_supabase():
     url = os.environ.get("SUPABASE_URL", "").strip()
     clave = os.environ.get("SUPABASE_KEY", "").strip()
 
+    # Saneado defensivo de la URL. El cliente de Supabase añade por su
+    # cuenta el sufijo /rest/v1, así que la URL debe ser la raíz limpia
+    # del proyecto. Si llega con una barra final o con el sufijo ya
+    # incluido (es fácil copiar del panel la dirección equivocada), la
+    # ruta resultante queda duplicada y el servidor responde PGRST125,
+    # "Invalid path specified in request URL".
+    url = url.rstrip("/")
+    for sufijo in ("/rest/v1", "/rest"):
+        if url.endswith(sufijo):
+            logging.warning(
+                "SUPABASE_URL incluía el sufijo '%s'. Se ignora: debe ser la "
+                "URL raíz del proyecto (https://xxxxx.supabase.co).", sufijo
+            )
+            url = url[: -len(sufijo)].rstrip("/")
+
     if not url or not clave:
         logging.error(
             "Faltan credenciales. Revisa que los secrets SUPABASE_URL y SUPABASE_KEY "
