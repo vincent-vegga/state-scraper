@@ -49,7 +49,7 @@ jobs:
   buscar-licitaciones:
     name: Leer feeds y registrar novedades en Supabase
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     env:
       TZ: Europe/Madrid
@@ -67,6 +67,13 @@ jobs:
       # Si borras esta línea, el script usa sus valores de serie.
       # Si en el botón manual escribes prefijos, mandan esos; si no, estos.
       CPV_PREFIJOS: ${{ inputs.cpv_prefijos || '7995,923,925' }}
+      # Colchón temporal ante caídas del robot o de la plataforma. El
+      # control de estado evita duplicados, así que ampliarlo es seguro.
+      DIAS_ANTIGUEDAD_MAX: '14'
+      # Debe ser lo bastante alto para que corte la ventana temporal y no
+      # este tope. Si el registro avisa de "TOPE DE PÁGINAS ALCANZADO",
+      # sube este número.
+      MAX_PAGINAS_POR_FEED: '10'
 
     steps:
       - name: Descargar el código del repositorio
