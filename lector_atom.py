@@ -32,8 +32,9 @@ Variables de entorno requeridas (en ejecución normal):
     SUPABASE_KEY   -> clave secreta (sb_secret_... o service_role)
 
 Variables de entorno opcionales (afinado sin editar el código):
-    DIAS_ANTIGUEDAD_MAX       -> ventana temporal en días (por defecto 7)
-    MAX_PAGINAS_POR_FEED      -> páginas a recorrer por feed (por defecto 3)
+    DIAS_ANTIGUEDAD_MAX       -> tope de retroceso en días (por defecto 14)
+    DIAS_MARGEN_SOLAPE        -> solape sobre lo ya guardado (por defecto 2)
+    MAX_PAGINAS_POR_FEED      -> freno de emergencia (por defecto 25)
     SOLO_CATALUNYA_AGREGADO   -> 'true'/'false' (por defecto true)
     FEEDS_EXTRA_CATALUNYA     -> URLs extra tratadas con el extractor catalán
 """
@@ -132,17 +133,28 @@ PISTAS_TEXTO_CATALUNYA: tuple[str, ...] = (
 )
 
 # --- Parámetros de ejecución ----------------------------------
-# Ventana temporal vigilada. Es el colchón ante una caída: si el robot
-# no se ejecuta durante N días, al volver sigue viendo lo publicado en
-# ese hueco. El control de estado impide alertar dos veces de lo mismo,
-# así que ampliarla no genera duplicados, solo algo más de descarga.
+# VENTANA ADAPTATIVA.
+# El script no vigila un número fijo de días: pregunta a Supabase cuál
+# es la publicación más reciente que ya guardó de cada fuente y retrocede
+# solo hasta ahí, con un margen de seguridad. En un día normal son pocas
+# páginas; si el robot ha estado caído, retrocede solo lo necesario para
+# tapar el hueco. Los feeds tienen profundidades muy distintas (PLACSP
+# publica unas 2.400 entradas diarias y Catalunya unas 475), así que cada
+# uno encuentra la suya sin configuración manual.
+#
+# DIAS_ANTIGUEDAD_MAX es el TOPE de retroceso, no el objetivo. Se aplica
+# en la primera ejecución de una fuente y como freno tras una caída larga.
 DIAS_ANTIGUEDAD_MAX = int(os.environ.get("DIAS_ANTIGUEDAD_MAX", "14"))
 
-# Tope de páginas por feed. Debe ser lo bastante alto para que quien
-# corte el recorrido sea la VENTANA TEMPORAL y no este límite: si el
-# tope se agota antes, se vigilan menos días de los previstos y el
-# script lo avisa explícitamente en el registro.
-MAX_PAGINAS_POR_FEED = int(os.environ.get("MAX_PAGINAS_POR_FEED", "10"))
+# Días de solape sobre la última publicación conocida. Cubre las entradas
+# que llegan al feed con retraso o fuera de orden cronológico.
+DIAS_MARGEN_SOLAPE = int(os.environ.get("DIAS_MARGEN_SOLAPE", "2"))
+
+# Freno de emergencia: tope de páginas por feed. Con la ventana adaptativa
+# no debería alcanzarse en operación normal; si el registro avisa de que
+# se ha alcanzado, es señal de que algo va mal (feed desbocado o memoria
+# vacía), no de que haya que subir el número sin más.
+MAX_PAGINAS_POR_FEED = int(os.environ.get("MAX_PAGINAS_POR_FEED", "25"))
 SOLO_CATALUNYA_AGREGADO = os.environ.get("SOLO_CATALUNYA_AGREGADO", "true").lower() != "false"
 
 TABLA_SUPABASE = "licitaciones"
@@ -626,18 +638,22 @@ def localizar_entradas(raiz: etree._Element) -> list[etree._Element]:
     return entradas if entradas else buscar_todos(raiz, "item")
 
 
-def recorrer_feed(sesion: requests.Session, feed: dict[str, str]) -> list[dict[str, Any]]:
+def recorrer_feed(
+    sesion: requests.Session,
+    feed: dict[str, str],
+    limite_temporal: datetime,
+) -> list[dict[str, Any]]:
     """
     Descarga un feed, sigue su paginación y devuelve las licitaciones que
-    superan el filtro CPV dentro de la ventana temporal.
+    superan el filtro CPV hasta la fecha `limite_temporal`.
 
-    Los feeds de PLACSP encadenan páginas hacia atrás con <link rel="next">.
-    MAX_PAGINAS_POR_FEED evita descargar el histórico completo cada mañana.
+    Los feeds encadenan páginas hacia atrás con <link rel="next">. Quien
+    debe detener el recorrido es la fecha, no el tope de páginas: ese tope
+    es solo un freno de emergencia y su activación se avisa como problema.
     """
     nombre = feed["nombre"]
     extractor = EXTRACTORES.get(feed.get("tipo", "placsp"), extraer_placsp)
     url_actual: str | None = feed["url"]
-    limite_temporal = datetime.now(timezone.utc) - timedelta(days=DIAS_ANTIGUEDAD_MAX)
 
     resultados: list[dict[str, Any]] = []
     total_entradas = 0
@@ -701,35 +717,28 @@ def recorrer_feed(sesion: requests.Session, feed: dict[str, str]) -> list[dict[s
 
     if fecha_mas_antigua is not None:
         dias_reales = (datetime.now(timezone.utc) - fecha_mas_antigua).days
-        logging.info("[%s] Profundidad real cubierta: %d días (objetivo: %d).",
-                     nombre, dias_reales, DIAS_ANTIGUEDAD_MAX)
-    else:
-        dias_reales = None
+        logging.info("[%s] Retrocedido hasta %s (%d días atrás), %d páginas.",
+                     nombre, fecha_mas_antigua.date(), dias_reales, numero_pagina)
 
     if not ventana_agotada and url_actual:
         logging.warning(
-            "[%s] TOPE DE PÁGINAS ALCANZADO (%d) antes de cubrir los %d días "
-            "solicitados. Se están vigilando menos días de los previstos: sube "
-            "MAX_PAGINAS_POR_FEED en el workflow.",
-            nombre, MAX_PAGINAS_POR_FEED, DIAS_ANTIGUEDAD_MAX,
+            "[%s] FRENO DE EMERGENCIA: alcanzadas las %d páginas sin llegar al "
+            "punto donde termina lo ya guardado. Puede haber un hueco sin "
+            "vigilar. Revisa si la memoria de Supabase está vacía o si el feed "
+            "ha aumentado mucho su volumen.",
+            nombre, MAX_PAGINAS_POR_FEED,
         )
-    elif dias_reales is not None and dias_reales + 1 < DIAS_ANTIGUEDAD_MAX:
-        logging.info("[%s] El feed no llega a %d días de antigüedad. Sin recorte.",
-                     nombre, DIAS_ANTIGUEDAD_MAX)
+    elif not ventana_agotada:
+        logging.info("[%s] El feed se ha agotado antes del límite temporal.", nombre)
 
     logging.info("[%s] %d entradas revisadas -> %d coinciden con los CPV objetivo.",
                  nombre, total_entradas, len(resultados))
     return resultados
 
 
-def leer_todos_los_feeds() -> tuple[list[dict[str, Any]], int]:
-    """
-    Recorre todas las fuentes y devuelve las coincidencias deduplicadas,
-    junto al número de fuentes que fallaron por completo.
-    """
+def construir_lista_fuentes() -> list[dict[str, str]]:
+    """Devuelve las fuentes configuradas más las añadidas por variable de entorno."""
     fuentes = list(FEEDS)
-
-    # Permite probar feeds catalanes adicionales sin editar el código.
     extras = os.environ.get("FEEDS_EXTRA_CATALUNYA", "").strip()
     if extras:
         for indice, url in enumerate(u.strip() for u in extras.split(",") if u.strip()):
@@ -738,26 +747,85 @@ def leer_todos_los_feeds() -> tuple[list[dict[str, Any]], int]:
                 "url": url,
                 "tipo": "catalunya",
             })
+    return fuentes
 
+
+def calcular_limite_temporal(cliente, feed: dict[str, str]) -> datetime:
+    """
+    Decide hasta dónde retroceder en un feed concreto.
+
+    Regla: hasta la publicación más reciente que ya tenemos guardada de
+    esa fuente, menos un margen de solape. Si no hay nada guardado (primera
+    ejecución) o si el hueco es enorme (caída larga), se aplica el tope de
+    DIAS_ANTIGUEDAD_MAX para que el trabajo siga siendo acotado.
+    """
+    ahora = datetime.now(timezone.utc)
+    tope = ahora - timedelta(days=DIAS_ANTIGUEDAD_MAX)
+
+    if cliente is None:  # modo diagnóstico: sin memoria, se usa el tope
+        return tope
+
+    ultima = fecha_ultima_guardada(cliente, feed["nombre"])
+    if ultima is None:
+        logging.info("[%s] Sin histórico previo: se retrocede el máximo (%d días).",
+                     feed["nombre"], DIAS_ANTIGUEDAD_MAX)
+        return tope
+
+    limite = ultima - timedelta(days=DIAS_MARGEN_SOLAPE)
+    if limite < tope:
+        logging.warning(
+            "[%s] El hueco desde la última ejecución supera %d días. Se recorta "
+            "al tope: puede quedar sin vigilar lo publicado antes de %s.",
+            feed["nombre"], DIAS_ANTIGUEDAD_MAX, tope.date(),
+        )
+        return tope
+
+    logging.info("[%s] Ventana adaptativa: hasta %s (última guardada %s).",
+                 feed["nombre"], limite.date(), ultima.date())
+    return limite
+
+
+def procesar_fuentes(cliente, diagnostico: bool) -> tuple[list[dict[str, Any]], int]:
+    """
+    Recorre las fuentes y, salvo en diagnóstico, GUARDA AL TERMINAR CADA UNA.
+
+    Guardar por fuente y no al final evita perder todo el trabajo si la
+    ejecución se corta a mitad: lo recolectado del primer feed ya está a
+    salvo en Supabase cuando empieza el segundo.
+    """
     sesion = crear_sesion_http()
-    por_identificador: dict[str, dict[str, Any]] = {}
-    feeds_fallidos = 0
+    ya_vistas: set[str] = set()
+    acumuladas: list[dict[str, Any]] = []
+    fuentes_fallidas = 0
 
-    for feed in fuentes:
+    for feed in construir_lista_fuentes():
+        nombre = feed["nombre"]
         try:
-            encontradas = recorrer_feed(sesion, feed)
-            if not encontradas:
-                # Cero resultados es legítimo con un nicho estrecho.
-                logging.info("[%s] Sin coincidencias en esta ejecución.", feed["nombre"])
-            for licitacion in encontradas:
-                # Si la misma licitación aparece en dos feeds, gana la primera.
-                por_identificador.setdefault(licitacion["id_licitacion"], licitacion)
-        except Exception as error:
-            feeds_fallidos += 1
-            logging.error("[%s] Fuente descartada por error inesperado: %s",
-                          feed["nombre"], error)
+            limite = calcular_limite_temporal(cliente, feed)
+            encontradas = recorrer_feed(sesion, feed, limite)
 
-    return list(por_identificador.values()), feeds_fallidos
+            # Si la misma licitación aparece en dos feeds, gana la primera.
+            unicas = [x for x in encontradas if x["id_licitacion"] not in ya_vistas]
+            ya_vistas.update(x["id_licitacion"] for x in unicas)
+
+            if not unicas:
+                logging.info("[%s] Sin coincidencias nuevas en esta ejecución.", nombre)
+
+            if diagnostico:
+                acumuladas.extend(unicas)
+                continue
+
+            nuevas = filtrar_ya_procesadas(cliente, unicas)
+            if nuevas:
+                guardar_licitaciones(cliente, nuevas)
+            acumuladas.extend(nuevas)
+
+        except Exception as error:
+            fuentes_fallidas += 1
+            logging.error("[%s] Fuente descartada por error inesperado: %s",
+                          nombre, error)
+
+    return acumuladas, fuentes_fallidas
 
 
 # ==============================================================
@@ -810,6 +878,34 @@ def obtener_cliente_supabase():
         logging.error("No se pudo conectar con Supabase (o la tabla '%s' no existe): %s",
                       TABLA_SUPABASE, error)
         sys.exit(1)
+
+
+def fecha_ultima_guardada(cliente, fuente: str) -> datetime | None:
+    """
+    Fecha de publicación más reciente que ya está en Supabase para esa fuente.
+
+    Es el marcador que hace adaptativa la ventana. Ante cualquier problema
+    devuelve None, y el llamante retrocede el máximo: fallar hacia el lado
+    de mirar de más nunca produce alertas duplicadas, porque el control de
+    estado las filtra después.
+    """
+    try:
+        respuesta = (
+            cliente.table(TABLA_SUPABASE)
+            .select("fecha_publicacion")
+            .eq("fuente", fuente)
+            .not_.is_("fecha_publicacion", "null")
+            .order("fecha_publicacion", desc=True)
+            .limit(1)
+            .execute()
+        )
+        filas = respuesta.data or []
+        if not filas:
+            return None
+        return a_fecha(filas[0].get("fecha_publicacion"))
+    except Exception as error:
+        logging.warning("No se pudo leer el marcador temporal de '%s': %s", fuente, error)
+        return None
 
 
 def filtrar_ya_procesadas(cliente, candidatas: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -873,7 +969,13 @@ def guardar_licitaciones(cliente, nuevas: list[dict[str, Any]]) -> int:
             "presupuesto": item["presupuesto"],
             "cpvs": item["cpvs"],
             "estado_licitacion": item["estado_licitacion"] or None,
-            "fecha_publicacion": item["fecha_publicacion"] or None,
+            # Se normaliza a ISO: el feed catalán puede traerla en formato
+            # RSS ("Mon, 17 Aug 2026 08:00:00 +0200"), que PostgreSQL no
+            # interpreta, y sin fecha el marcador adaptativo no funciona.
+            "fecha_publicacion": (
+                fecha_iso.isoformat()
+                if (fecha_iso := a_fecha(item["fecha_publicacion"])) else None
+            ),
             "estado_pipeline": "pendiente_analisis",
         }
         for item in nuevas
@@ -1027,37 +1129,36 @@ def main() -> int:
     configurar_logging()
     logging.info("=" * 62)
     logging.info("STATE SCRAPER v2 · Pasos 1 y 2")
-    logging.info("Filtro CPV: %s | Ventana: %d días | Páginas por feed: %d",
-                 ", ".join(CPV_PREFIJOS), DIAS_ANTIGUEDAD_MAX, MAX_PAGINAS_POR_FEED)
+    logging.info("Filtro CPV: %s", ", ".join(CPV_PREFIJOS))
+    logging.info("Ventana adaptativa | Tope: %d días | Solape: %d días | "
+                 "Freno: %d páginas",
+                 DIAS_ANTIGUEDAD_MAX, DIAS_MARGEN_SOLAPE, MAX_PAGINAS_POR_FEED)
     logging.info("Filtro geográfico en canal agregado: %s",
                  "solo Catalunya" if SOLO_CATALUNYA_AGREGADO else "desactivado")
     logging.info("=" * 62)
 
-    # --- PASO 1 ---
-    candidatas, feeds_fallidos = leer_todos_los_feeds()
+    # La conexión se abre ANTES de descargar nada: el marcador temporal de
+    # Supabase es lo que decide cuánto hay que retroceder en cada feed.
+    cliente = None if opciones.diagnostico else obtener_cliente_supabase()
 
-    if feeds_fallidos and feeds_fallidos >= len(FEEDS):
+    resultados, fuentes_fallidas = procesar_fuentes(cliente, opciones.diagnostico)
+
+    if fuentes_fallidas and fuentes_fallidas >= len(FEEDS):
         logging.error("Todas las fuentes han fallado. Revisa las URLs de los feeds.")
         return 1
 
     if opciones.diagnostico:
         logging.info("MODO DIAGNÓSTICO: %d licitaciones coincidirían con el filtro.",
-                     len(candidatas))
-        informar_cobertura(candidatas)
-        mostrar_resumen(candidatas[:15])
+                     len(resultados))
+        informar_cobertura(resultados)
+        mostrar_resumen(resultados[:15])
         logging.info("No se ha consultado ni modificado Supabase.")
         return 0
 
-    # --- PASO 2 ---
-    cliente = obtener_cliente_supabase()
-    nuevas = filtrar_ya_procesadas(cliente, candidatas)
-
-    mostrar_resumen(nuevas)
-    if nuevas:
-        guardar_licitaciones(cliente, nuevas)
-
-    publicar_informe_actions(nuevas)
-    logging.info("Ejecución completada.")
+    mostrar_resumen(resultados)
+    publicar_informe_actions(resultados)
+    logging.info("Ejecución completada: %d licitaciones nuevas guardadas.",
+                 len(resultados))
     return 0
 
 
