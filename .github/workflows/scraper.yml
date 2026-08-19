@@ -46,6 +46,12 @@ jobs:
       # Filtro geográfico del canal agregado. Ponlo a 'false' si algún
       # día quieres cubrir todas las comunidades autónomas.
       SOLO_CATALUNYA_AGREGADO: 'true'
+      # EL SECTOR SE DEFINE AQUÍ, no en el código. Prefijos CPV separados
+      # por comas. Nicho actual: cultura y eventos.
+      #   Para afinar a espectáculo en vivo: '92312,9234,79953,79952100'
+      #   Para cambiar de sector entero, sustituye la lista completa.
+      # Si borras esta línea, el script usa sus valores de serie.
+      CPV_PREFIJOS: '7995,923,925'
 
     steps:
       - name: Descargar el código del repositorio
