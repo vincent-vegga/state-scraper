@@ -1,0 +1,86 @@
+# ============================================================
+# STATE SCRAPER v2 · Robot diario (Pasos 1 y 2)
+# ============================================================
+# Cada mañana GitHub enciende un ordenador en la nube, instala
+# Python, ejecuta el scraper y escribe los resultados EN SUPABASE.
+# El repositorio no recibe ningún commit automático: aquí solo
+# vive el código.
+
+name: Scraper de licitaciones (eventos y cultura)
+
+on:
+  # HORARIO. GitHub programa siempre en UTC, no en hora española.
+  #   '0 6 * * *' = 08:00 en horario de verano peninsular (CEST)
+  #                 07:00 en horario de invierno (CET)
+  # Si quieres clavar las 08:00 en invierno, cambia el 6 por un 7
+  # el último domingo de octubre.
+  schedule:
+    - cron: '0 6 * * *'
+
+  # Botón manual: pestaña Actions > este workflow > "Run workflow".
+  # Úsalo para la primera prueba en lugar de esperar a mañana.
+  workflow_dispatch:
+
+# Solo lectura del repositorio. Al no haber commits automáticos,
+# el robot no necesita permiso de escritura sobre el código.
+permissions:
+  contents: read
+
+# Evita que dos ejecuciones escriban en Supabase a la vez.
+concurrency:
+  group: scraper-licitaciones
+  cancel-in-progress: false
+
+jobs:
+  buscar-licitaciones:
+    name: Leer feeds y registrar novedades en Supabase
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      TZ: Europe/Madrid
+      # Inyección de los secrets. GitHub los sustituye en tiempo de
+      # ejecución y los enmascara automáticamente en los registros.
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      # Filtro geográfico del canal agregado. Ponlo a 'false' si algún
+      # día quieres cubrir todas las comunidades autónomas.
+      SOLO_CATALUNYA_AGREGADO: 'true'
+
+    steps:
+      - name: Descargar el código del repositorio
+        uses: actions/checkout@v4
+
+      - name: Preparar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Verificar que los secrets están configurados
+        run: |
+          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_KEY" ]; then
+            echo "::error::Faltan los secrets SUPABASE_URL o SUPABASE_KEY."
+            echo "::error::Créalos en Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+          echo "Credenciales presentes."
+
+      - name: Ejecutar el scraper
+        id: scraper
+        run: python lector_atom.py
+
+      - name: Comprobar que el repositorio sigue limpio
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::warning::El scraper ha dejado ficheros sin rastrear:"
+            git status --porcelain
+            echo "::warning::El diseño exige que no escriba nada en disco."
+          else
+            echo "Repositorio inmaculado. Todos los datos están en Supabase."
+          fi
