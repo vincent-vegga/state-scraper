@@ -132,8 +132,17 @@ PISTAS_TEXTO_CATALUNYA: tuple[str, ...] = (
 )
 
 # --- Parámetros de ejecución ----------------------------------
-DIAS_ANTIGUEDAD_MAX = int(os.environ.get("DIAS_ANTIGUEDAD_MAX", "7"))
-MAX_PAGINAS_POR_FEED = int(os.environ.get("MAX_PAGINAS_POR_FEED", "3"))
+# Ventana temporal vigilada. Es el colchón ante una caída: si el robot
+# no se ejecuta durante N días, al volver sigue viendo lo publicado en
+# ese hueco. El control de estado impide alertar dos veces de lo mismo,
+# así que ampliarla no genera duplicados, solo algo más de descarga.
+DIAS_ANTIGUEDAD_MAX = int(os.environ.get("DIAS_ANTIGUEDAD_MAX", "14"))
+
+# Tope de páginas por feed. Debe ser lo bastante alto para que quien
+# corte el recorrido sea la VENTANA TEMPORAL y no este límite: si el
+# tope se agota antes, se vigilan menos días de los previstos y el
+# script lo avisa explícitamente en el registro.
+MAX_PAGINAS_POR_FEED = int(os.environ.get("MAX_PAGINAS_POR_FEED", "10"))
 SOLO_CATALUNYA_AGREGADO = os.environ.get("SOLO_CATALUNYA_AGREGADO", "true").lower() != "false"
 
 TABLA_SUPABASE = "licitaciones"
@@ -632,6 +641,8 @@ def recorrer_feed(sesion: requests.Session, feed: dict[str, str]) -> list[dict[s
 
     resultados: list[dict[str, Any]] = []
     total_entradas = 0
+    ventana_agotada = False       # ¿paramos por fecha (bien) o por tope (mal)?
+    fecha_mas_antigua: datetime | None = None
 
     for numero_pagina in range(1, MAX_PAGINAS_POR_FEED + 1):
         if not url_actual:
@@ -665,6 +676,11 @@ def recorrer_feed(sesion: requests.Session, feed: dict[str, str]) -> list[dict[s
             if datos is None:
                 continue
 
+            fecha_entrada = a_fecha(datos["fecha_publicacion"])
+            if fecha_entrada and (fecha_mas_antigua is None
+                                  or fecha_entrada < fecha_mas_antigua):
+                fecha_mas_antigua = fecha_entrada
+
             if not es_reciente(datos["fecha_publicacion"], limite_temporal):
                 fuera_de_ventana += 1
                 continue
@@ -677,10 +693,29 @@ def recorrer_feed(sesion: requests.Session, feed: dict[str, str]) -> list[dict[s
         if entradas and fuera_de_ventana == len(entradas):
             logging.info("[%s] Página %d ya fuera de la ventana temporal. Fin.",
                          nombre, numero_pagina)
+            ventana_agotada = True
             break
 
         enlaces_siguientes = raiz.xpath("./*[local-name()='link'][@rel='next']/@href")
         url_actual = enlaces_siguientes[0] if enlaces_siguientes else None
+
+    if fecha_mas_antigua is not None:
+        dias_reales = (datetime.now(timezone.utc) - fecha_mas_antigua).days
+        logging.info("[%s] Profundidad real cubierta: %d días (objetivo: %d).",
+                     nombre, dias_reales, DIAS_ANTIGUEDAD_MAX)
+    else:
+        dias_reales = None
+
+    if not ventana_agotada and url_actual:
+        logging.warning(
+            "[%s] TOPE DE PÁGINAS ALCANZADO (%d) antes de cubrir los %d días "
+            "solicitados. Se están vigilando menos días de los previstos: sube "
+            "MAX_PAGINAS_POR_FEED en el workflow.",
+            nombre, MAX_PAGINAS_POR_FEED, DIAS_ANTIGUEDAD_MAX,
+        )
+    elif dias_reales is not None and dias_reales + 1 < DIAS_ANTIGUEDAD_MAX:
+        logging.info("[%s] El feed no llega a %d días de antigüedad. Sin recorte.",
+                     nombre, DIAS_ANTIGUEDAD_MAX)
 
     logging.info("[%s] %d entradas revisadas -> %d coinciden con los CPV objetivo.",
                  nombre, total_entradas, len(resultados))
