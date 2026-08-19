@@ -1,0 +1,22 @@
+# ============================================================
+# STATE SCRAPER v2 - Dependencias (Pasos 1 y 2)
+# ============================================================
+# Versiones acotadas: ">=" para recibir parches de seguridad,
+# "<" para que una version mayor con cambios incompatibles no
+# rompa el robot de madrugada sin avisar a nadie.
+
+# Descarga de los feeds por HTTPS, con timeouts y reintentos.
+requests>=2.32,<3
+
+# Parseo de XML. Se elige lxml frente a BeautifulSoup porque
+# permite XPath con local-name(), que localiza las etiquetas
+# CODICE (cac:, cbc:, cac-place-ext:) sin declarar un mapa de
+# namespaces que quedaria obsoleto en cada version del esquema.
+lxml>=5.2,<7
+
+# Cliente oficial de Supabase: unico destino de los datos.
+supabase>=2.10,<3
+
+# Interpretacion robusta de fechas ISO 8601 con zonas horarias
+# y formatos ligeramente irregulares entre publicadores.
+python-dateutil>=2.9,<3
