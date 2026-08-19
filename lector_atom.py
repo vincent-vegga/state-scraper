@@ -61,11 +61,31 @@ from lxml import etree
 
 # --- Códigos CPV objetivo -------------------------------------
 # Se acepta la licitación si CUALQUIERA de sus CPV empieza por
-# uno de estos prefijos:
+# uno de estos prefijos.
+#
+# EL SECTOR ES CONFIGURACIÓN, NO CÓDIGO. Estos valores son el
+# nicho de partida (cultura y eventos), pero se sobrescriben con
+# la variable de entorno CPV_PREFIJOS sin tocar este fichero.
+# Cambiar de sector es editar una línea del workflow.
+#
+# Nicho actual:
 #   7995xxxx -> Servicios de organización de eventos, ferias y congresos
 #   923xxxxx -> Servicios de entretenimiento (espectáculos, artes escénicas)
 #   925xxxxx -> Servicios de bibliotecas, archivos, museos y patrimonio
-CPV_PREFIJOS: tuple[str, ...] = ("7995", "923", "925")
+CPV_PREFIJOS_POR_DEFECTO: tuple[str, ...] = ("7995", "923", "925")
+
+
+def _leer_prefijos_cpv() -> tuple[str, ...]:
+    """Lee los prefijos de la variable de entorno; si no hay, usa los de serie."""
+    bruto = os.environ.get("CPV_PREFIJOS", "").strip()
+    if bruto:
+        prefijos = tuple(p.strip() for p in bruto.split(",") if p.strip())
+        if prefijos:
+            return prefijos
+    return CPV_PREFIJOS_POR_DEFECTO
+
+
+CPV_PREFIJOS: tuple[str, ...] = _leer_prefijos_cpv()
 
 # --- Fuentes ---------------------------------------------------
 # El campo "tipo" decide QUÉ EXTRACTOR se aplica a cada feed.
@@ -319,6 +339,64 @@ def extraer_enlace(entrada: etree._Element) -> str:
     return identificador if identificador.startswith("http") else ""
 
 
+def normalizar_codigo_postal(valor: str | None) -> str | None:
+    """
+    Devuelve un CP español válido de 5 dígitos, o None.
+
+    Dos saneados que importan en datos reales:
+      · Algunos publicadores exportan el CP como número y pierden el cero
+        inicial: '8017' es en realidad '08017' (Barcelona). Se rellena.
+      · Se valida que los dos primeros dígitos estén entre 01 y 52, que es
+        el rango de provincias. Así se descartan códigos extranjeros o
+        cifras que no eran un CP (referencias, importes, años).
+    """
+    if not valor:
+        return None
+    digitos = "".join(c for c in valor if c.isdigit())
+    if len(digitos) == 4:
+        digitos = "0" + digitos
+    if len(digitos) != 5:
+        return None
+    if not 1 <= int(digitos[:2]) <= 52:
+        return None
+    return digitos
+
+
+def extraer_codigo_postal(entrada: etree._Element) -> str | None:
+    """
+    Localiza el código postal de la licitación, por orden de fiabilidad.
+
+    1. LUGAR DE EJECUCIÓN (<cac:RealizedLocation>). Es el dato correcto:
+       dónde se presta el servicio.
+    2. Cualquier <cbc:PostalZone> de la entrada. En la práctica suele ser
+       la dirección del órgano de contratación. Para contratos locales
+       coincide con el lugar de ejecución; para un organismo central que
+       licita en otra provincia, NO coincide. Se acepta como aproximación
+       consciente, no como equivalente.
+    3. Texto libre: cinco dígitos precedidos de 'CP' o 'código postal'.
+    """
+    for localizacion in buscar_todos(entrada, "RealizedLocation"):
+        codigo = normalizar_codigo_postal(primer_texto(localizacion, "PostalZone"))
+        if codigo:
+            return codigo
+
+    for nodo in buscar_todos(entrada, "PostalZone"):
+        codigo = normalizar_codigo_postal(texto_limpio(nodo.text))
+        if codigo:
+            return codigo
+
+    texto_completo = " ".join(entrada.itertext())
+    coincidencia = re.search(
+        r"(?:c\.?p\.?|c[óo]digo\s+postal)[^0-9]{0,10}(\d{4,5})",
+        texto_completo,
+        re.IGNORECASE,
+    )
+    if coincidencia:
+        return normalizar_codigo_postal(coincidencia.group(1))
+
+    return None
+
+
 # ==============================================================
 # 4. EXTRACTORES ESPECIALIZADOS POR FUENTE
 #
@@ -363,6 +441,7 @@ def extraer_placsp(entrada: etree._Element, fuente: str) -> dict[str, Any] | Non
                   or "(sin título)",
         "organo": organo or "(órgano no informado)",
         "enlace": enlace,
+        "codigo_postal": extraer_codigo_postal(entrada),
         "presupuesto": extraer_presupuesto(entrada),
         "cpvs": extraer_cpvs(entrada),
         "estado_licitacion": primer_texto(entrada, "ContractFolderStatusCode"),
@@ -457,6 +536,7 @@ def extraer_catalunya(entrada: etree._Element, fuente: str) -> dict[str, Any] | 
                   or "(sin título)",
         "organo": organo or "(órgano no informado)",
         "enlace": enlace,
+        "codigo_postal": extraer_codigo_postal(entrada),
         "presupuesto": presupuesto,
         "cpvs": extraer_cpvs(entrada),
         "estado_licitacion": primer_texto(entrada, "ContractFolderStatusCode")
@@ -753,6 +833,7 @@ def guardar_licitaciones(cliente, nuevas: list[dict[str, Any]]) -> int:
             "titulo": item["titulo"],
             "organo": item["organo"],
             "enlace": item["enlace"] or None,
+            "codigo_postal": item["codigo_postal"],
             "presupuesto": item["presupuesto"],
             "cpvs": item["cpvs"],
             "estado_licitacion": item["estado_licitacion"] or None,
@@ -800,8 +881,9 @@ def mostrar_resumen(licitaciones: list[dict[str, Any]]) -> None:
     logging.info("--- NUEVAS LICITACIONES DETECTADAS ---")
     for item in licitaciones:
         logging.info("  · [%s] %s", item["origen"], item["titulo"][:100])
-        logging.info("    Órgano: %s | Presupuesto: %s | CPV: %s",
+        logging.info("    Órgano: %s | CP: %s | Presupuesto: %s | CPV: %s",
                      item["organo"][:60],
+                     item["codigo_postal"] or "s/d",
                      formatear_importe(item["presupuesto"]),
                      ", ".join(item["cpvs"][:5]))
 
@@ -831,15 +913,16 @@ def publicar_informe_actions(licitaciones: list[dict[str, Any]]) -> None:
             if not licitaciones:
                 fichero.write("_Sin novedades. Los datos históricos están en Supabase._\n")
                 return
-            fichero.write("| Origen | Título | Órgano | Presupuesto | CPV |\n")
-            fichero.write("|---|---|---|---|---|\n")
+            fichero.write("| Origen | CP | Título | Órgano | Presupuesto | CPV |\n")
+            fichero.write("|---|---|---|---|---|---|\n")
             for item in licitaciones[:50]:
                 titulo = item["titulo"][:90].replace("|", "/")
                 organo = item["organo"][:50].replace("|", "/")
                 enlace = item["enlace"]
                 celda_titulo = f"[{titulo}]({enlace})" if enlace else titulo
                 fichero.write(
-                    f"| {item['origen']} | {celda_titulo} | {organo} | "
+                    f"| {item['origen']} | {item['codigo_postal'] or '—'} | "
+                    f"{celda_titulo} | {organo} | "
                     f"{formatear_importe(item['presupuesto'])} | "
                     f"{', '.join(item['cpvs'][:3])} |\n"
                 )
