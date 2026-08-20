@@ -15,7 +15,7 @@ on:
   # Si quieres clavar las 08:00 en invierno, cambia el 6 por un 7
   # el último domingo de octubre.
   schedule:
-    - cron: '23 7 * * *'
+    - cron: '0 6 * * *'
 
   # Botón manual: pestaña Actions > este workflow > "Run workflow".
   # Al pulsarlo aparecen dos opciones para hacer pruebas sin tocar código.
@@ -76,6 +76,10 @@ jobs:
       #   Freno de emergencia. Si salta el aviso en el registro, NO subas
       #   este número sin mirar antes por qué: suele indicar otro problema.
       MAX_PAGINAS_POR_FEED: '25'
+      #   Proporción de una página que debe estar fuera de ventana para dejar
+      #   de paginar. PARÁMETRO A CALIBRAR: si un feed sigue agotando páginas,
+      #   bájalo a 0.8. Cuanto más bajo, antes corta y más rezagados se pierde.
+      UMBRAL_CORTE_PAGINA: '0.9'
 
     steps:
       - name: Descargar el código del repositorio
