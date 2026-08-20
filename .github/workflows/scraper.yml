@@ -15,7 +15,7 @@ on:
   # Si quieres clavar las 08:00 en invierno, cambia el 6 por un 7
   # el último domingo de octubre.
   schedule:
-    - cron: '0 6 * * *'
+    - cron: '23 7 * * *'
 
   # Botón manual: pestaña Actions > este workflow > "Run workflow".
   # Al pulsarlo aparecen dos opciones para hacer pruebas sin tocar código.
