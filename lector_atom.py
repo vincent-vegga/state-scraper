@@ -152,6 +152,10 @@ DIAS_ANTIGUEDAD_MAX = int(os.environ.get("DIAS_ANTIGUEDAD_MAX", "14"))
 # impide el corte y obliga a descargar decenas de páginas inútiles.
 UMBRAL_CORTE_PAGINA = float(os.environ.get("UMBRAL_CORTE_PAGINA", "0.9"))
 
+# Ventana que usa el modo diagnóstico, que no tiene memoria que consultar.
+# Corta a propósito: sirve para medir cobertura de campos, no para recolectar.
+DIAS_DIAGNOSTICO = int(os.environ.get("DIAS_DIAGNOSTICO", "3"))
+
 # Días de solape sobre la última publicación conocida. Cubre las entradas
 # que llegan al feed con retraso o fuera de orden cronológico.
 DIAS_MARGEN_SOLAPE = int(os.environ.get("DIAS_MARGEN_SOLAPE", "2"))
@@ -468,6 +472,44 @@ def extraer_fecha_limite(entrada: etree._Element) -> str | None:
     return None
 
 
+# Tipos de documento en CODICE, con el nombre que usaremos internamente.
+# Un expediente referencia varios: al menos pliego administrativo y técnico.
+TIPOS_DOCUMENTO: dict[str, str] = {
+    "LegalDocumentReference":      "pliego_administrativo",
+    "TechnicalDocumentReference":  "pliego_tecnico",
+    "AdditionalDocumentReference": "adicional",
+}
+
+
+def extraer_documentos(entrada: etree._Element) -> list[dict[str, str]]:
+    """
+    URLs de los documentos que el feed referencia para esta licitación.
+
+    En CODICE cada referencia cuelga de un nodo distinto según su
+    naturaleza jurídica, y la dirección vive dentro de
+    <cac:Attachment><cac:ExternalReference><cbc:URI>.
+
+    Si estas URLs vienen en el feed, el paso 3 no necesita navegar ninguna
+    página HTML: basta con descargar lo que aquí se indica.
+    """
+    documentos: list[dict[str, str]] = []
+    vistas: set[str] = set()
+
+    for etiqueta, tipo in TIPOS_DOCUMENTO.items():
+        for bloque in buscar_todos(entrada, etiqueta):
+            url = primer_texto(bloque, "URI")
+            if not url or url in vistas:
+                continue
+            vistas.add(url)
+            documentos.append({
+                "tipo": tipo,
+                "url": url,
+                "referencia": primer_texto(bloque, "ID"),
+            })
+
+    return documentos
+
+
 # ==============================================================
 # 4. EXTRACTORES ESPECIALIZADOS POR FUENTE
 #
@@ -514,6 +556,7 @@ def extraer_placsp(entrada: etree._Element, fuente: str) -> dict[str, Any] | Non
         "enlace": enlace,
         "codigo_postal": extraer_codigo_postal(entrada),
         "fecha_limite": extraer_fecha_limite(entrada),
+        "documentos": extraer_documentos(entrada),
         "presupuesto": extraer_presupuesto(entrada),
         "cpvs": extraer_cpvs(entrada),
         "estado_licitacion": primer_texto(entrada, "ContractFolderStatusCode"),
@@ -610,6 +653,7 @@ def extraer_catalunya(entrada: etree._Element, fuente: str) -> dict[str, Any] | 
         "enlace": enlace,
         "codigo_postal": extraer_codigo_postal(entrada),
         "fecha_limite": extraer_fecha_limite(entrada),
+        "documentos": extraer_documentos(entrada),
         "presupuesto": presupuesto,
         "cpvs": extraer_cpvs(entrada),
         "estado_licitacion": primer_texto(entrada, "ContractFolderStatusCode")
@@ -841,8 +885,14 @@ def calcular_limite_temporal(cliente, feed: dict[str, str]) -> datetime:
     ahora = datetime.now(timezone.utc)
     tope = ahora - timedelta(days=DIAS_ANTIGUEDAD_MAX)
 
-    if cliente is None:  # modo diagnóstico: sin memoria, se usa el tope
-        return tope
+    if cliente is None:
+        # Modo diagnóstico: no hay memoria que consultar. Se usa una ventana
+        # corta y propia, porque retroceder el tope completo tardaría diez
+        # minutos y dispararía el aviso de freno sin que haya problema real.
+        limite_diagnostico = ahora - timedelta(days=DIAS_DIAGNOSTICO)
+        logging.info("[%s] Diagnóstico: ventana corta de %d días.",
+                     feed["nombre"], DIAS_DIAGNOSTICO)
+        return limite_diagnostico
 
     ultima = fecha_ultima_guardada(cliente, feed["nombre"])
     if ultima is None:
@@ -1121,6 +1171,25 @@ def informar_cobertura(licitaciones: list[dict[str, Any]]) -> None:
         n = sum(1 for x in licitaciones
                 if any(c.startswith(prefijo) for c in x["cpvs"]))
         logging.info("  %-10s %4d  (%5.1f %%)", prefijo, n, 100 * n / total)
+
+    # Documentos referenciados: decide si el paso 3 necesita navegar HTML.
+    con_documentos = sum(1 for x in licitaciones if x.get("documentos"))
+    logging.info("--- DOCUMENTOS REFERENCIADOS EN EL FEED ---")
+    logging.info("  Licitaciones con al menos un documento: %d/%d (%.1f %%)",
+                 con_documentos, total, 100 * con_documentos / total)
+    if con_documentos:
+        por_tipo = Counter(d["tipo"] for x in licitaciones
+                           for d in x.get("documentos", []))
+        for tipo, n in por_tipo.most_common():
+            logging.info("  %-24s %4d referencias", tipo, n)
+        media = sum(len(x.get("documentos", [])) for x in licitaciones) / con_documentos
+        logging.info("  Media de documentos por licitación con documentos: %.1f", media)
+        for x in licitaciones:
+            if x.get("documentos"):
+                logging.info("  EJEMPLO · %s", x["titulo"][:70])
+                for d in x["documentos"][:3]:
+                    logging.info("    [%s] %s", d["tipo"], d["url"][:110])
+                break
 
     provincias = Counter(
         x["codigo_postal"][:2] for x in licitaciones if x["codigo_postal"]
