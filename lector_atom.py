@@ -481,33 +481,121 @@ TIPOS_DOCUMENTO: dict[str, str] = {
 }
 
 
+def extension_de(nombre: str) -> str:
+    """
+    Extensión del fichero a partir de su nombre, o 'desconocida'.
+
+    Permite saber el formato de un documento SIN descargarlo: el feed trae
+    el nombre original con el que el órgano lo subió.
+    """
+    if "." not in nombre:
+        return "desconocida"
+    posible = nombre.rsplit(".", 1)[-1].strip().lower()
+    return posible if 1 < len(posible) <= 5 and posible.isalnum() else "desconocida"
+
+
 def extraer_documentos(entrada: etree._Element) -> list[dict[str, str]]:
     """
-    URLs de los documentos que el feed referencia para esta licitación.
+    Documentos que el feed referencia para esta licitación.
 
     En CODICE cada referencia cuelga de un nodo distinto según su
     naturaleza jurídica, y la dirección vive dentro de
     <cac:Attachment><cac:ExternalReference><cbc:URI>.
 
-    Si estas URLs vienen en el feed, el paso 3 no necesita navegar ninguna
-    página HTML: basta con descargar lo que aquí se indica.
+    De cada uno se recoge:
+      · tipo        -> código oficial (DOC_PCAP, DOC_PPT...) si viene; si no,
+                       se deduce del nodo del que cuelga.
+      · nombre      -> nombre original del fichero, con su extensión.
+      · extension   -> el formato, conocido ANTES de descargar nada.
+      · url         -> dirección directa, sin sesión ni token temporal.
+      · hash        -> huella del contenido. Permite detectar que un pliego
+                       ha sido modificado sin necesidad de archivarlo.
     """
     documentos: list[dict[str, str]] = []
     vistas: set[str] = set()
 
-    for etiqueta, tipo in TIPOS_DOCUMENTO.items():
+    for etiqueta, tipo_del_nodo in TIPOS_DOCUMENTO.items():
         for bloque in buscar_todos(entrada, etiqueta):
             url = primer_texto(bloque, "URI")
             if not url or url in vistas:
                 continue
             vistas.add(url)
+            nombre = primer_texto(bloque, "ID")
             documentos.append({
-                "tipo": tipo,
+                "tipo": primer_texto(bloque, "DocumentTypeCode") or tipo_del_nodo,
+                "tipo_del_nodo": tipo_del_nodo,
+                "nombre": nombre,
+                "extension": extension_de(nombre),
                 "url": url,
-                "referencia": primer_texto(bloque, "ID"),
+                "hash": primer_texto(bloque, "DocumentHash"),
             })
 
     return documentos
+
+
+# Un campo de solvencia relleno con "ver la cláusula 8ª del pliego" está
+# formalmente cumplimentado pero es inservible: remite al PDF. Detectarlo
+# permite medir cuánto del contenido útil vive realmente fuera del feed.
+PATRON_REMISION = re.compile(
+    r"(cl[áa]usula|apartado|pliego|\bpcap\b|\bppt\b|anexo|v[ée]ase|ver\s+el|"
+    r"seg[úu]n\s+lo|conforme\s+a\s+lo|indicad[oa]s?\s+en)",
+    re.IGNORECASE,
+)
+
+
+def extraer_condiciones(entrada: etree._Element) -> dict[str, Any]:
+    """
+    Condiciones de la licitación que CODICE publica en forma estructurada.
+
+    Distingue deliberadamente entre dos cosas que se confunden:
+
+      · CRITERIOS DE ADJUDICACIÓN: cómo te van a puntuar. Vienen con
+        ponderación numérica y clasificados en objetivos (OBJ) o de
+        juicio de valor (SUBJ). Suelen estar completos.
+
+      · REQUISITOS DE SOLVENCIA: qué necesitas acreditar para poder
+        presentarte. El campo existe, pero los órganos lo rellenan a
+        menudo con una remisión al pliego en PDF. Se marca cuáles son
+        remisiones para poder medir cuánto contenido útil falta.
+    """
+    criterios: list[dict[str, Any]] = []
+    for bloque in buscar_todos(entrada, "AwardingCriteria"):
+        descripcion = primer_texto(bloque, "Description")
+        if not descripcion:
+            continue
+        criterios.append({
+            "descripcion": descripcion,
+            "tipo": primer_texto(bloque, "AwardingCriteriaTypeCode"),
+            "peso": a_numero(primer_texto(bloque, "WeightNumeric")),
+        })
+
+    solvencia: list[dict[str, Any]] = []
+    for etiqueta in ("TechnicalEvaluationCriteria",
+                     "FinancialEvaluationCriteria",
+                     "SpecificTendererRequirement"):
+        for bloque in buscar_todos(entrada, etiqueta):
+            descripcion = primer_texto(bloque, "Description")
+            if not descripcion:
+                continue
+            solvencia.append({
+                "clase": etiqueta,
+                "descripcion": descripcion,
+                "es_remision": bool(PATRON_REMISION.search(descripcion)),
+            })
+
+    garantia = None
+    for bloque in buscar_todos(entrada, "RequiredFinancialGuarantee"):
+        garantia = a_numero(primer_texto(bloque, "AmountRate"))
+        if garantia is not None:
+            break
+
+    return {
+        "criterios_adjudicacion": criterios,
+        "solvencia": solvencia,
+        "garantia_pct": garantia,
+        "email_contacto": primer_texto(entrada, "ElectronicMail"),
+        "telefono_contacto": primer_texto(entrada, "Telephone"),
+    }
 
 
 # ==============================================================
@@ -557,6 +645,7 @@ def extraer_placsp(entrada: etree._Element, fuente: str) -> dict[str, Any] | Non
         "codigo_postal": extraer_codigo_postal(entrada),
         "fecha_limite": extraer_fecha_limite(entrada),
         "documentos": extraer_documentos(entrada),
+        **extraer_condiciones(entrada),
         "presupuesto": extraer_presupuesto(entrada),
         "cpvs": extraer_cpvs(entrada),
         "estado_licitacion": primer_texto(entrada, "ContractFolderStatusCode"),
@@ -654,6 +743,7 @@ def extraer_catalunya(entrada: etree._Element, fuente: str) -> dict[str, Any] | 
         "codigo_postal": extraer_codigo_postal(entrada),
         "fecha_limite": extraer_fecha_limite(entrada),
         "documentos": extraer_documentos(entrada),
+        **extraer_condiciones(entrada),
         "presupuesto": presupuesto,
         "cpvs": extraer_cpvs(entrada),
         "estado_licitacion": primer_texto(entrada, "ContractFolderStatusCode")
@@ -1178,18 +1268,71 @@ def informar_cobertura(licitaciones: list[dict[str, Any]]) -> None:
     logging.info("  Licitaciones con al menos un documento: %d/%d (%.1f %%)",
                  con_documentos, total, 100 * con_documentos / total)
     if con_documentos:
-        por_tipo = Counter(d["tipo"] for x in licitaciones
-                           for d in x.get("documentos", []))
-        for tipo, n in por_tipo.most_common():
-            logging.info("  %-24s %4d referencias", tipo, n)
-        media = sum(len(x.get("documentos", [])) for x in licitaciones) / con_documentos
-        logging.info("  Media de documentos por licitación con documentos: %.1f", media)
+        todos = [d for x in licitaciones for d in x.get("documentos", [])]
+
+        logging.info("  Media de documentos por licitación: %.1f",
+                     len(todos) / con_documentos)
+
+        logging.info("  Por tipo:")
+        for tipo, n in Counter(d["tipo"] for d in todos).most_common(10):
+            logging.info("    %-28s %4d", tipo, n)
+
+        # Lo decisivo para el paso 4b: qué formatos habrá que saber leer.
+        logging.info("  Por formato de fichero:")
+        for ext, n in Counter(d["extension"] for d in todos).most_common(10):
+            logging.info("    %-28s %4d  (%5.1f %%)", ext, n, 100 * n / len(todos))
+
+        con_hash = sum(1 for d in todos if d["hash"])
+        logging.info("  Con huella de contenido: %d/%d (%.1f %%)",
+                     con_hash, len(todos), 100 * con_hash / len(todos))
+
         for x in licitaciones:
             if x.get("documentos"):
                 logging.info("  EJEMPLO · %s", x["titulo"][:70])
-                for d in x["documentos"][:3]:
-                    logging.info("    [%s] %s", d["tipo"], d["url"][:110])
+                for d in x["documentos"][:4]:
+                    logging.info("    [%s] %s", d["tipo"], d["nombre"][:70])
                 break
+
+    # ¿Cuánto del pliego vive ya, estructurado, dentro del feed?
+    logging.info("--- CONDICIONES ESTRUCTURADAS EN EL FEED ---")
+    con_criterios = [x for x in licitaciones if x.get("criterios_adjudicacion")]
+    logging.info("  Con criterios de adjudicación: %d/%d (%.1f %%)",
+                 len(con_criterios), total, 100 * len(con_criterios) / total)
+    if con_criterios:
+        n_crit = sum(len(x["criterios_adjudicacion"]) for x in con_criterios)
+        con_peso = sum(1 for x in con_criterios
+                       for c in x["criterios_adjudicacion"] if c["peso"] is not None)
+        logging.info("    Media de criterios: %.1f | con ponderación: %d/%d (%.1f %%)",
+                     n_crit / len(con_criterios), con_peso, n_crit,
+                     100 * con_peso / n_crit)
+        suman_cien = sum(
+            1 for x in con_criterios
+            if abs(sum(c["peso"] or 0 for c in x["criterios_adjudicacion"]) - 100) < 0.5
+        )
+        logging.info("    Ponderaciones que suman 100: %d/%d (%.1f %%)",
+                     suman_cien, len(con_criterios), 100 * suman_cien / len(con_criterios))
+
+    con_solvencia = [x for x in licitaciones if x.get("solvencia")]
+    logging.info("  Con requisitos de solvencia: %d/%d (%.1f %%)",
+                 len(con_solvencia), total, 100 * len(con_solvencia) / total)
+    if con_solvencia:
+        campos = [s for x in con_solvencia for s in x["solvencia"]]
+        remisiones = sum(1 for s in campos if s["es_remision"])
+        logging.info("    LA CIFRA CLAVE · campos que solo remiten al pliego: "
+                     "%d/%d (%.1f %%)", remisiones, len(campos),
+                     100 * remisiones / len(campos))
+        for s in campos:
+            if not s["es_remision"]:
+                logging.info("    Ejemplo CON contenido: %s", s["descripcion"][:100])
+                break
+        for s in campos:
+            if s["es_remision"]:
+                logging.info("    Ejemplo de REMISIÓN:    %s", s["descripcion"][:100])
+                break
+
+    logging.info("  Con garantía definitiva: %d/%d | Con email de contacto: %d/%d",
+                 sum(1 for x in licitaciones if x.get("garantia_pct") is not None), total,
+                 sum(1 for x in licitaciones if x.get("email_contacto")), total)
 
     provincias = Counter(
         x["codigo_postal"][:2] for x in licitaciones if x["codigo_postal"]
