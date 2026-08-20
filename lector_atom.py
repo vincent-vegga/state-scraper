@@ -146,6 +146,12 @@ PISTAS_TEXTO_CATALUNYA: tuple[str, ...] = (
 # en la primera ejecución de una fuente y como freno tras una caída larga.
 DIAS_ANTIGUEDAD_MAX = int(os.environ.get("DIAS_ANTIGUEDAD_MAX", "14"))
 
+# Proporción de una página que debe quedar fuera de ventana para dejar de
+# paginar. No se exige el 100 % porque el canal agregado mezcla plataformas
+# con retrasos distintos: casi siempre se cuela algún rezagado reciente que
+# impide el corte y obliga a descargar decenas de páginas inútiles.
+UMBRAL_CORTE_PAGINA = float(os.environ.get("UMBRAL_CORTE_PAGINA", "0.9"))
+
 # Días de solape sobre la última publicación conocida. Cubre las entradas
 # que llegan al feed con retraso o fuera de orden cronológico.
 DIAS_MARGEN_SOLAPE = int(os.environ.get("DIAS_MARGEN_SOLAPE", "2"))
@@ -658,7 +664,15 @@ def recorrer_feed(
     resultados: list[dict[str, Any]] = []
     total_entradas = 0
     ventana_agotada = False       # ¿paramos por fecha (bien) o por tope (mal)?
-    fecha_mas_antigua: datetime | None = None
+
+    # Dos métricas distintas, y confundirlas induce a error:
+    #   · leída   -> la entrada más antigua que se llegó a mirar, aunque se
+    #                descartara por vieja. Sirve para saber si se alcanzó
+    #                el límite temporal pedido.
+    #   · cubierta-> la más antigua que entró DENTRO de la ventana. Es la
+    #                profundidad real de vigilancia.
+    fecha_mas_antigua_leida: datetime | None = None
+    fecha_mas_antigua_cubierta: datetime | None = None
 
     for numero_pagina in range(1, MAX_PAGINAS_POR_FEED + 1):
         if not url_actual:
@@ -693,34 +707,54 @@ def recorrer_feed(
                 continue
 
             fecha_entrada = a_fecha(datos["fecha_publicacion"])
-            if fecha_entrada and (fecha_mas_antigua is None
-                                  or fecha_entrada < fecha_mas_antigua):
-                fecha_mas_antigua = fecha_entrada
+            if fecha_entrada and (fecha_mas_antigua_leida is None
+                                  or fecha_entrada < fecha_mas_antigua_leida):
+                fecha_mas_antigua_leida = fecha_entrada
 
             if not es_reciente(datos["fecha_publicacion"], limite_temporal):
                 fuera_de_ventana += 1
                 continue
 
+            # A partir de aquí la entrada está DENTRO de la ventana: es lo
+            # que cuenta como profundidad realmente cubierta.
+            if fecha_entrada and (fecha_mas_antigua_cubierta is None
+                                  or fecha_entrada < fecha_mas_antigua_cubierta):
+                fecha_mas_antigua_cubierta = fecha_entrada
+
             if cumple_filtro_cpv(datos["cpvs"]):
                 resultados.append(datos)
 
-        # Si la página entera queda fuera de la ventana temporal, las
-        # siguientes son aún más antiguas: dejamos de paginar.
-        if entradas and fuera_de_ventana == len(entradas):
-            logging.info("[%s] Página %d ya fuera de la ventana temporal. Fin.",
-                         nombre, numero_pagina)
+        # Si la MAYORÍA de la página queda fuera de la ventana, las siguientes
+        # son aún más antiguas: dejamos de paginar. Exigir el 100 % hacía que
+        # un solo rezagado reciente impidiera el corte indefinidamente.
+        if entradas and fuera_de_ventana >= len(entradas) * UMBRAL_CORTE_PAGINA:
+            logging.info(
+                "[%s] Página %d: %d de %d entradas fuera de ventana (>= %.0f %%). Fin.",
+                nombre, numero_pagina, fuera_de_ventana, len(entradas),
+                UMBRAL_CORTE_PAGINA * 100,
+            )
             ventana_agotada = True
             break
 
         enlaces_siguientes = raiz.xpath("./*[local-name()='link'][@rel='next']/@href")
         url_actual = enlaces_siguientes[0] if enlaces_siguientes else None
 
-    if fecha_mas_antigua is not None:
-        dias_reales = (datetime.now(timezone.utc) - fecha_mas_antigua).days
-        logging.info("[%s] Retrocedido hasta %s (%d días atrás), %d páginas.",
-                     nombre, fecha_mas_antigua.date(), dias_reales, numero_pagina)
+    ahora = datetime.now(timezone.utc)
+    if fecha_mas_antigua_cubierta is not None:
+        dias = (ahora - fecha_mas_antigua_cubierta).days
+        logging.info("[%s] Ventana cubierta hasta %s (%d días), %d páginas.",
+                     nombre, fecha_mas_antigua_cubierta.date(), dias, numero_pagina)
+    if fecha_mas_antigua_leida is not None:
+        logging.info("[%s] Entrada más antigua leída: %s (descartada por vieja "
+                     "si es anterior a %s).",
+                     nombre, fecha_mas_antigua_leida.date(), limite_temporal.date())
 
-    if not ventana_agotada and url_actual:
+    # Solo hay hueco si NO se llegó a leer nada anterior al límite pedido.
+    # Sin esta comprobación, un feed que retrocede de más disparaba la alarma.
+    alcanzo_el_limite = (fecha_mas_antigua_leida is not None
+                         and fecha_mas_antigua_leida <= limite_temporal)
+
+    if not ventana_agotada and url_actual and not alcanzo_el_limite:
         logging.warning(
             "[%s] FRENO DE EMERGENCIA: alcanzadas las %d páginas sin llegar al "
             "punto donde termina lo ya guardado. Puede haber un hueco sin "
@@ -728,7 +762,7 @@ def recorrer_feed(
             "ha aumentado mucho su volumen.",
             nombre, MAX_PAGINAS_POR_FEED,
         )
-    elif not ventana_agotada:
+    elif not ventana_agotada and not url_actual:
         logging.info("[%s] El feed se ha agotado antes del límite temporal.", nombre)
 
     logging.info("[%s] %d entradas revisadas -> %d coinciden con los CPV objetivo.",
