@@ -425,6 +425,49 @@ def extraer_codigo_postal(entrada: etree._Element) -> str | None:
     return None
 
 
+def extraer_fecha_limite(entrada: etree._Element) -> str | None:
+    """
+    Fecha límite de presentación de ofertas, si el feed la trae.
+
+    En CODICE vive dentro de <cac:TenderingProcess>, repartida entre una
+    fecha y una hora en nodos separados que hay que recomponer.
+
+    Orden de búsqueda:
+      1. Plazo de presentación de OFERTAS (procedimiento abierto).
+      2. Plazo de presentación de SOLICITUDES DE PARTICIPACIÓN, que es el
+         que aplica en procedimientos restringidos y de licitación con
+         negociación, donde la primera fase no es una oferta.
+      3. Cualquier nodo cuyo nombre contenga "Deadline", por si un
+         publicador usa una variante del esquema.
+
+    Se devuelve en ISO 8601 para que PostgreSQL la interprete sin ayuda.
+    """
+    def _componer(bloque: etree._Element) -> str | None:
+        fecha_texto = primer_texto(bloque, "EndDate")
+        if not fecha_texto:
+            return None
+        hora_texto = primer_texto(bloque, "EndTime")
+        combinada = f"{fecha_texto} {hora_texto}".strip() if hora_texto else fecha_texto
+        momento = a_fecha(combinada) or a_fecha(fecha_texto)
+        return momento.isoformat() if momento else None
+
+    for etiqueta in ("TenderSubmissionDeadlinePeriod",
+                     "ParticipationRequestReceptionPeriod"):
+        for bloque in buscar_todos(entrada, etiqueta):
+            resultado = _componer(bloque)
+            if resultado:
+                return resultado
+
+    for bloque in entrada.xpath(
+        ".//*[contains(translate(local-name(), 'DEADLIN', 'deadlin'), 'deadlin')]"
+    ):
+        resultado = _componer(bloque)
+        if resultado:
+            return resultado
+
+    return None
+
+
 # ==============================================================
 # 4. EXTRACTORES ESPECIALIZADOS POR FUENTE
 #
@@ -470,6 +513,7 @@ def extraer_placsp(entrada: etree._Element, fuente: str) -> dict[str, Any] | Non
         "organo": organo or "(órgano no informado)",
         "enlace": enlace,
         "codigo_postal": extraer_codigo_postal(entrada),
+        "fecha_limite": extraer_fecha_limite(entrada),
         "presupuesto": extraer_presupuesto(entrada),
         "cpvs": extraer_cpvs(entrada),
         "estado_licitacion": primer_texto(entrada, "ContractFolderStatusCode"),
@@ -565,6 +609,7 @@ def extraer_catalunya(entrada: etree._Element, fuente: str) -> dict[str, Any] | 
         "organo": organo or "(órgano no informado)",
         "enlace": enlace,
         "codigo_postal": extraer_codigo_postal(entrada),
+        "fecha_limite": extraer_fecha_limite(entrada),
         "presupuesto": presupuesto,
         "cpvs": extraer_cpvs(entrada),
         "estado_licitacion": primer_texto(entrada, "ContractFolderStatusCode")
@@ -1063,6 +1108,7 @@ def informar_cobertura(licitaciones: list[dict[str, Any]]) -> None:
         ("Presupuesto", sum(1 for x in licitaciones if x["presupuesto"] is not None)),
         ("Órgano", sum(1 for x in licitaciones if not x["organo"].startswith("("))),
         ("Expediente", sum(1 for x in licitaciones if x["expediente"])),
+        ("Fecha límite", sum(1 for x in licitaciones if x.get("fecha_limite"))),
     )
     for etiqueta, presentes in medidas:
         logging.info("  %-16s %4d/%-4d (%5.1f %%)",
@@ -1094,11 +1140,13 @@ def mostrar_resumen(licitaciones: list[dict[str, Any]]) -> None:
     logging.info("--- NUEVAS LICITACIONES DETECTADAS ---")
     for item in licitaciones:
         logging.info("  · [%s] %s", item["origen"], item["titulo"][:100])
-        logging.info("    Órgano: %s | CP: %s | Presupuesto: %s | CPV: %s",
+        limite = item.get("fecha_limite")
+        logging.info("    Órgano: %s | CP: %s | Presupuesto: %s | Límite: %s",
                      item["organo"][:60],
                      item["codigo_postal"] or "s/d",
                      formatear_importe(item["presupuesto"]),
-                     ", ".join(item["cpvs"][:5]))
+                     limite[:16].replace("T", " ") if limite else "s/d")
+        logging.info("    CPV: %s", ", ".join(item["cpvs"][:5]))
 
 
 def publicar_informe_actions(licitaciones: list[dict[str, Any]]) -> None:
