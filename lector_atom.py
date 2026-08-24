@@ -489,6 +489,26 @@ def extraer_fecha_publicacion(entrada: etree._Element) -> str | None:
     return momento.isoformat() if momento else None
 
 
+def origen_fecha_publicacion(entrada: etree._Element) -> str:
+    """
+    De qué campo salió la fecha de publicación: diagnóstico, no dato.
+
+    Importa distinguirlo porque `IssueDate` es la fecha oficial del anuncio
+    y `published` es la de ATOM, que puede coincidir con la de alta en el
+    feed. Si casi todo viene de `published`, es que el feed no transporta
+    la fecha oficial y hay que ir a buscarla al documento fuente.
+    """
+    tiene_issue = entrada.xpath(
+        ".//*[local-name()='IssueDate']"
+        "[not(ancestor::*[contains(local-name(), 'DocumentReference')])]"
+    )
+    if any(texto_limpio(n.text) for n in tiene_issue):
+        return "IssueDate"
+    if primer_texto(entrada, "published", solo_hijos=True):
+        return "published"
+    return "ninguna"
+
+
 def extraer_fecha_limite(entrada: etree._Element) -> str | None:
     """
     Fecha límite de presentación de ofertas, si el feed la trae.
@@ -714,6 +734,7 @@ def extraer_placsp(entrada: etree._Element, fuente: str) -> dict[str, Any] | Non
                                or primer_texto(entrada, "published", solo_hijos=True),
         # Para el usuario: cuánto tiempo lleva el anuncio en la calle.
         "fecha_publicacion": extraer_fecha_publicacion(entrada),
+        "origen_fecha": origen_fecha_publicacion(entrada),
     }
 
 
@@ -815,6 +836,7 @@ def extraer_catalunya(entrada: etree._Element, fuente: str) -> dict[str, Any] | 
                                or primer_texto(entrada, "published", solo_hijos=True)
                                or primer_texto(entrada, "pubDate", solo_hijos=True),
         "fecha_publicacion": extraer_fecha_publicacion(entrada),
+        "origen_fecha": origen_fecha_publicacion(entrada),
     }
 
 
@@ -1401,6 +1423,23 @@ def informar_cobertura(licitaciones: list[dict[str, Any]]) -> None:
     logging.info("  Con garantía definitiva: %d/%d | Con email de contacto: %d/%d",
                  sum(1 for x in licitaciones if x.get("garantia_pct") is not None), total,
                  sum(1 for x in licitaciones if x.get("email_contacto")), total)
+
+    logging.info("  Origen de la fecha de publicación: %s",
+                 ", ".join(f"{k}={v}" for k, v in
+                           Counter(x.get("origen_fecha", "?")
+                                   for x in licitaciones).most_common()))
+
+    # ¿Viene el documento fuente (CallForTenders) referenciado en el feed?
+    todos_doc = [d for x in licitaciones for d in x.get("documentos", [])]
+    if todos_doc:
+        logging.info("--- CATÁLOGO DE TIPOS DE DOCUMENTO ---")
+        for tipo, n in Counter(d["tipo"] for d in todos_doc).most_common(12):
+            logging.info("    %-30s %4d", tipo, n)
+        xml = [d for d in todos_doc if d["extension"] == "xml"]
+        logging.info("  Documentos en XML (posible CallForTenders): %d/%d",
+                     len(xml), len(todos_doc))
+        for d in xml[:3]:
+            logging.info("    [%s] %s", d["tipo"], d["nombre"][:70])
 
     # ¿Cuántas de las "nuevas" son reediciones de anuncios antiguos?
     desfases = []
