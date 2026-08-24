@@ -221,12 +221,39 @@ def a_numero(valor: str | None) -> float | None:
         return None
 
 
+# CODICE publica las fechas en el formato `date` de XML Schema, que admite
+# zona horaria SIN hora: "2026-06-09+02:00". Es legal y correcto, pero ni
+# dateutil ni la librería estándar lo interpretan, así que hay que insertar
+# la hora cero antes del desfase para poder leerlo.
+_FECHA_CON_ZONA_SIN_HORA = re.compile(
+    r"^(\d{4}-\d{2}-\d{2})([+-]\d{2}:\d{2}|Z)(\s+.*)?$"
+)
+
+
 def a_fecha(valor: str | None) -> datetime | None:
-    """Interpreta una fecha del feed y la devuelve siempre con zona horaria."""
+    """
+    Interpreta una fecha del feed y la devuelve siempre con zona horaria.
+
+    Tolera los tres formatos que aparecen en datos reales:
+      · ISO completo de ATOM     -> 2026-08-20T09:00:00+02:00
+      · RSS del canal catalán    -> Mon, 17 Aug 2026 08:00:00 +0200
+      · `date` con zona de CODICE-> 2026-06-09+02:00   (sin hora)
+    """
     if not valor:
         return None
+
+    texto = valor.strip()
+
+    # "2026-06-09+02:00" -> "2026-06-09T00:00:00+02:00"
+    # Si detrás viene una hora suelta (IssueDate + IssueTime concatenados),
+    # se descarta el desfase y se deja que se interprete la hora real.
+    coincidencia = _FECHA_CON_ZONA_SIN_HORA.match(texto)
+    if coincidencia:
+        dia, zona, resto = coincidencia.groups()
+        texto = f"{dia}T{resto.strip()}{zona}" if resto else f"{dia}T00:00:00{zona}"
+
     try:
-        fecha = parser_fechas.parse(valor.strip())
+        fecha = parser_fechas.parse(texto)
     except (ValueError, OverflowError, TypeError):
         return None
     if fecha.tzinfo is None:
@@ -427,6 +454,39 @@ def extraer_codigo_postal(entrada: etree._Element) -> str | None:
         return normalizar_codigo_postal(coincidencia.group(1))
 
     return None
+
+
+def extraer_fecha_publicacion(entrada: etree._Element) -> str | None:
+    """
+    Fecha REAL de publicación del anuncio, distinta de su última modificación.
+
+    Un expediente publicado en julio que recibe cualquier cambio en agosto
+    (se sube un documento, cambia de estado, se publica la adjudicación)
+    reaparece en el feed con un `updated` de hoy. Para el script es nuevo;
+    para el usuario lleva un mes en la calle. Y eso importa: si algo lleva
+    tres semanas publicado y te acabas de enterar, la competencia te lleva
+    tres semanas de ventaja para preparar su oferta.
+
+    Se busca `IssueDate` de CODICE, excluyendo expresamente las que cuelgan
+    de referencias a documentos: cada PDF tiene su propia fecha de emisión
+    y no es la del anuncio. Si no viene, se usa el `published` de ATOM.
+    """
+    nodos = entrada.xpath(
+        ".//*[local-name()='IssueDate']"
+        "[not(ancestor::*[contains(local-name(), 'DocumentReference')])]"
+    )
+    for nodo in nodos:
+        fecha_texto = texto_limpio(nodo.text)
+        if not fecha_texto:
+            continue
+        padre = nodo.getparent()
+        hora = primer_texto(padre, "IssueTime", solo_hijos=True) if padre is not None else ""
+        momento = a_fecha(f"{fecha_texto} {hora}".strip()) or a_fecha(fecha_texto)
+        if momento:
+            return momento.isoformat()
+
+    momento = a_fecha(primer_texto(entrada, "published", solo_hijos=True))
+    return momento.isoformat() if momento else None
 
 
 def extraer_fecha_limite(entrada: etree._Element) -> str | None:
@@ -649,8 +709,11 @@ def extraer_placsp(entrada: etree._Element, fuente: str) -> dict[str, Any] | Non
         "presupuesto": extraer_presupuesto(entrada),
         "cpvs": extraer_cpvs(entrada),
         "estado_licitacion": primer_texto(entrada, "ContractFolderStatusCode"),
-        "fecha_publicacion": primer_texto(entrada, "updated", solo_hijos=True)
-                             or primer_texto(entrada, "published", solo_hijos=True),
+        # Interna: gobierna la paginación, porque es el orden del feed.
+        "fecha_actualizacion": primer_texto(entrada, "updated", solo_hijos=True)
+                               or primer_texto(entrada, "published", solo_hijos=True),
+        # Para el usuario: cuánto tiempo lleva el anuncio en la calle.
+        "fecha_publicacion": extraer_fecha_publicacion(entrada),
     }
 
 
@@ -748,9 +811,10 @@ def extraer_catalunya(entrada: etree._Element, fuente: str) -> dict[str, Any] | 
         "cpvs": extraer_cpvs(entrada),
         "estado_licitacion": primer_texto(entrada, "ContractFolderStatusCode")
                              or resumen.get("estado", ""),
-        "fecha_publicacion": primer_texto(entrada, "updated", solo_hijos=True)
-                             or primer_texto(entrada, "published", solo_hijos=True)
-                             or primer_texto(entrada, "pubDate", solo_hijos=True),
+        "fecha_actualizacion": primer_texto(entrada, "updated", solo_hijos=True)
+                               or primer_texto(entrada, "published", solo_hijos=True)
+                               or primer_texto(entrada, "pubDate", solo_hijos=True),
+        "fecha_publicacion": extraer_fecha_publicacion(entrada),
     }
 
 
@@ -885,12 +949,12 @@ def recorrer_feed(
             if datos is None:
                 continue
 
-            fecha_entrada = a_fecha(datos["fecha_publicacion"])
+            fecha_entrada = a_fecha(datos["fecha_actualizacion"])
             if fecha_entrada and (fecha_mas_antigua_leida is None
                                   or fecha_entrada < fecha_mas_antigua_leida):
                 fecha_mas_antigua_leida = fecha_entrada
 
-            if not es_reciente(datos["fecha_publicacion"], limite_temporal):
+            if not es_reciente(datos["fecha_actualizacion"], limite_temporal):
                 fuera_de_ventana += 1
                 continue
 
@@ -1111,17 +1175,17 @@ def fecha_ultima_guardada(cliente, fuente: str) -> datetime | None:
     try:
         respuesta = (
             cliente.table(TABLA_SUPABASE)
-            .select("fecha_publicacion")
+            .select("fecha_actualizacion")
             .eq("fuente", fuente)
-            .not_.is_("fecha_publicacion", "null")
-            .order("fecha_publicacion", desc=True)
+            .not_.is_("fecha_actualizacion", "null")
+            .order("fecha_actualizacion", desc=True)
             .limit(1)
             .execute()
         )
         filas = respuesta.data or []
         if not filas:
             return None
-        return a_fecha(filas[0].get("fecha_publicacion"))
+        return a_fecha(filas[0].get("fecha_actualizacion"))
     except Exception as error:
         logging.warning("No se pudo leer el marcador temporal de '%s': %s", fuente, error)
         return None
@@ -1191,10 +1255,12 @@ def guardar_licitaciones(cliente, nuevas: list[dict[str, Any]]) -> int:
             # Se normaliza a ISO: el feed catalán puede traerla en formato
             # RSS ("Mon, 17 Aug 2026 08:00:00 +0200"), que PostgreSQL no
             # interpreta, y sin fecha el marcador adaptativo no funciona.
-            "fecha_publicacion": (
+            "fecha_actualizacion": (
                 fecha_iso.isoformat()
-                if (fecha_iso := a_fecha(item["fecha_publicacion"])) else None
+                if (fecha_iso := a_fecha(item["fecha_actualizacion"])) else None
             ),
+            "fecha_publicacion": item.get("fecha_publicacion"),
+            "fecha_limite": item.get("fecha_limite"),
             "estado_pipeline": "pendiente_analisis",
         }
         for item in nuevas
@@ -1249,6 +1315,8 @@ def informar_cobertura(licitaciones: list[dict[str, Any]]) -> None:
         ("Órgano", sum(1 for x in licitaciones if not x["organo"].startswith("("))),
         ("Expediente", sum(1 for x in licitaciones if x["expediente"])),
         ("Fecha límite", sum(1 for x in licitaciones if x.get("fecha_limite"))),
+        ("Fecha publicación real", sum(1 for x in licitaciones
+                                       if x.get("fecha_publicacion"))),
     )
     for etiqueta, presentes in medidas:
         logging.info("  %-16s %4d/%-4d (%5.1f %%)",
@@ -1333,6 +1401,23 @@ def informar_cobertura(licitaciones: list[dict[str, Any]]) -> None:
     logging.info("  Con garantía definitiva: %d/%d | Con email de contacto: %d/%d",
                  sum(1 for x in licitaciones if x.get("garantia_pct") is not None), total,
                  sum(1 for x in licitaciones if x.get("email_contacto")), total)
+
+    # ¿Cuántas de las "nuevas" son reediciones de anuncios antiguos?
+    desfases = []
+    for x in licitaciones:
+        pub = a_fecha(x.get("fecha_publicacion"))
+        act = a_fecha(x.get("fecha_actualizacion"))
+        if pub and act:
+            desfases.append((act - pub).days)
+    if desfases:
+        desfases.sort()
+        reediciones = sum(1 for d in desfases if d > 7)
+        logging.info("--- ANTIGÜEDAD REAL DE LO DETECTADO ---")
+        logging.info("  Días entre publicación y última actualización: "
+                     "mediana %d | máximo %d",
+                     desfases[len(desfases) // 2], desfases[-1])
+        logging.info("  Publicadas hace más de 7 días (reediciones): %d/%d (%.1f %%)",
+                     reediciones, len(desfases), 100 * reediciones / len(desfases))
 
     provincias = Counter(
         x["codigo_postal"][:2] for x in licitaciones if x["codigo_postal"]
