@@ -456,6 +456,26 @@ def extraer_codigo_postal(entrada: etree._Element) -> str | None:
     return None
 
 
+def extraer_estado(entrada: etree._Element) -> tuple[str, str]:
+    """
+    Estado del expediente: código y etiqueta oficial en español.
+
+    Es el campo que distingue una oportunidad viva de un trámite muerto.
+    Un expediente FORMALIZADO está firmado y en ejecución: aparece en el
+    feed como novedad porque nunca se había visto, pero no es una
+    oportunidad, es ruido.
+
+    CODICE publica la etiqueta legible dentro del atributo `name` del
+    propio nodo, así que se lee la taxonomía oficial en lugar de
+    mantener a mano una lista de códigos que quedaría desactualizada.
+    """
+    for nodo in buscar_todos(entrada, "ContractFolderStatusCode"):
+        codigo = texto_limpio(nodo.text)
+        if codigo:
+            return codigo, texto_limpio(nodo.get("name") or "")
+    return "", ""
+
+
 def extraer_fecha_publicacion(entrada: etree._Element) -> str | None:
     """
     Fecha REAL de publicación del anuncio, distinta de su última modificación.
@@ -728,7 +748,8 @@ def extraer_placsp(entrada: etree._Element, fuente: str) -> dict[str, Any] | Non
         **extraer_condiciones(entrada),
         "presupuesto": extraer_presupuesto(entrada),
         "cpvs": extraer_cpvs(entrada),
-        "estado_licitacion": primer_texto(entrada, "ContractFolderStatusCode"),
+        "estado_licitacion": extraer_estado(entrada)[0],
+        "estado_nombre": extraer_estado(entrada)[1],
         # Interna: gobierna la paginación, porque es el orden del feed.
         "fecha_actualizacion": primer_texto(entrada, "updated", solo_hijos=True)
                                or primer_texto(entrada, "published", solo_hijos=True),
@@ -830,8 +851,8 @@ def extraer_catalunya(entrada: etree._Element, fuente: str) -> dict[str, Any] | 
         **extraer_condiciones(entrada),
         "presupuesto": presupuesto,
         "cpvs": extraer_cpvs(entrada),
-        "estado_licitacion": primer_texto(entrada, "ContractFolderStatusCode")
-                             or resumen.get("estado", ""),
+        "estado_licitacion": extraer_estado(entrada)[0] or resumen.get("estado", ""),
+        "estado_nombre": extraer_estado(entrada)[1],
         "fecha_actualizacion": primer_texto(entrada, "updated", solo_hijos=True)
                                or primer_texto(entrada, "published", solo_hijos=True)
                                or primer_texto(entrada, "pubDate", solo_hijos=True),
@@ -1274,6 +1295,7 @@ def guardar_licitaciones(cliente, nuevas: list[dict[str, Any]]) -> int:
             "presupuesto": item["presupuesto"],
             "cpvs": item["cpvs"],
             "estado_licitacion": item["estado_licitacion"] or None,
+            "estado_nombre": item.get("estado_nombre") or None,
             # Se normaliza a ISO: el feed catalán puede traerla en formato
             # RSS ("Mon, 17 Aug 2026 08:00:00 +0200"), que PostgreSQL no
             # interpreta, y sin fecha el marcador adaptativo no funciona.
@@ -1423,6 +1445,16 @@ def informar_cobertura(licitaciones: list[dict[str, Any]]) -> None:
     logging.info("  Con garantía definitiva: %d/%d | Con email de contacto: %d/%d",
                  sum(1 for x in licitaciones if x.get("garantia_pct") is not None), total,
                  sum(1 for x in licitaciones if x.get("email_contacto")), total)
+
+    # EL FILTRO QUE DE VERDAD IMPORTA: ¿está viva la oportunidad?
+    logging.info("--- ESTADO DE LOS EXPEDIENTES ---")
+    estados = Counter(
+        (x.get("estado_licitacion") or "(vacío)", x.get("estado_nombre") or "")
+        for x in licitaciones
+    )
+    for (codigo, nombre), n in estados.most_common(15):
+        logging.info("    %-8s %-34s %4d  (%5.1f %%)",
+                     codigo, nombre[:34], n, 100 * n / total)
 
     logging.info("  Origen de la fecha de publicación: %s",
                  ", ".join(f"{k}={v}" for k, v in
