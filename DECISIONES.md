@@ -314,105 +314,165 @@ que no toleraría es prometerla.
 
 ---
 
-## 18. El feed trae plazo y URLs de documentos: el paso 3 deja de ser crítico
+## 20. El estado del expediente es el filtro más rentable de todos
 
-**Contexto.** El diseño asumía que la fecha límite de presentación y el
-acceso a los pliegos exigían descargar y analizar documentos. El paso 3
-era el más incierto del pipeline, estimado entre 3 y 8 horas.
+**Contexto.** El sistema alertaba de contratos "nuevos" que en realidad
+eran de abril y se habían formalizado la víspera. La primera hipótesis
+—que fuese un problema de fechas— era errónea.
 
-**Lo que dijeron los datos.** Medido en modo diagnóstico sobre licitaciones
-reales:
+**La causa.** Un expediente vive un ciclo: publicado, en evaluación,
+adjudicado, formalizado. Cada cambio lo devuelve al feed. El scraper lo
+veía por primera vez y lo daba por nuevo, aunque llegara ya muerto.
 
-| Dato | Cobertura |
-|---|---|
-| Fecha límite de presentación | 95,0 % |
-| Al menos un documento referenciado | 90,5 % |
-| Documentos por licitación | 3,6 de media |
+**Los datos.** Sobre 455 filas:
 
-Y las URLs de descarga **funcionan en ventana de incógnito**: son
-autocontenidas, sin identificador de sesión ni token temporal.
+| Código | Significado | Filas |
+|---|---|---|
+| EV | En evaluación, plazo cerrado | 139 |
+| RES | Formalizada | 131 |
+| ADJ | Adjudicada | 113 |
+| PUB | **Publicada, plazo abierto** | **71** |
+| PRE | Anuncio previo | 1 |
 
-**Consecuencias.**
+**El 84 % de lo capturado eran expedientes cerrados.** Un solo filtro por
+estado eliminó más ruido que todo el trabajo previo sobre ventanas
+temporales y fechas.
 
-1. **Se puede emitir una alerta completa sin descargar nada.** Título,
-   órgano, presupuesto, CPV, código postal, enlace y plazo bastan para que
-   un profesional decida si le interesa. El MVP se cierra con
-   `1 → 2 → 4a → 5`.
-2. **El paso 3 pasa de cuello de botella a trámite.** No hay que navegar
-   HTML ni sortear detección de bots: la URL viene en el feed y se
-   descarga directamente. Queda como mejora, no como requisito.
-3. **Confirma la Decisión 17.** Con 3,6 documentos de media por
-   licitación, la tabla `documentos` es obligatoria.
+**Verificación de `EV`.** No estaba claro si significaba "en plazo" o "en
+evaluación", y la diferencia decidía si eran 139 oportunidades o 139
+ruidos. Se confirmó por tres vías independientes: la definición del
+código, tres expedientes abiertos a mano en el portal, y la propia tabla
+—`EV` tenía cero filas con plazo abierto mientras que todas las `PUB` con
+plazo lo tenían vigente.
 
-**Detalles del esquema CODICE.** Cada tipo de documento cuelga de un nodo
-distinto según su naturaleza jurídica: `LegalDocumentReference` (pliego de
-cláusulas administrativas), `TechnicalDocumentReference` (prescripciones
-técnicas) y `AdditionalDocumentReference` (anexos y cuadros). La dirección
-vive dentro de `Attachment > ExternalReference > URI`.
+**Decisión de diseño: lista blanca, no lista negra.** La vista filtra por
+`estado = 'PUB'` en lugar de excluir los estados muertos conocidos. Si
+aparece un código nuevo, queda fuera por defecto en vez de colarse. Se
+validó de inmediato: `ANUL` apareció días después sin haberlo previsto.
 
-**Detalle del plazo.** Los procedimientos restringidos y de licitación con
-negociación no publican plazo de ofertas sino de solicitudes de
-participación, en un nodo distinto. Buscar solo el primero habría dejado
-esos expedientes como "sin fecha".
-
-**Pendiente de confirmar.** En qué formato responde el servlet de descarga
-(PDF, HTML o XML). Se resolverá registrando el tipo de contenido al
-descargar, no suponiéndolo. Si sirve HTML o XML, el paso 4b se ahorra toda
-la extracción de PDF.
+**Se guarda todo igualmente.** Un contrato formalizado es basura como
+alerta pero es inteligencia comercial: dice qué órgano tiene presupuesto
+real para este tipo de servicio, cuánto paga y en qué fechas. La tabla es
+el archivo; la vista es la selección.
 
 ---
 
-## 19. El feed no da para una alerta: da para un informe
+## 21. Tres fechas distintas, no una
 
-**Contexto.** Tras confirmar que el plazo venía en el feed, quedaba la duda
-de cuánto del contenido del pliego estaba ya volcado en campos
-estructurados. La hipótesis del arquitecto era que `TenderingTerms` vendría
-"relleno pero incompleto", porque el primer expediente inspeccionado tenía
-la solvencia rellena con una remisión: *"Al menos uno de los medios
-indicados en el apartado 2.2 de la Cláusula 8ª del Pliego"*.
+**El error.** La columna se llamaba `fecha_publicacion` pero guardaba el
+`updated` del feed, que es la fecha de última **modificación**.
 
-**Los datos desmintieron la hipótesis.** Medido sobre 312 licitaciones:
+**Por qué importa.** No basta con saber si el plazo sigue abierto. Si un
+contrato lleva tres semanas publicado y te acabas de enterar, la
+competencia lleva tres semanas de ventaja para preparar su oferta. Es una
+observación del Director de Proyecto que corrigió el criterio del
+arquitecto, que había dado por suficiente la fecha límite.
 
-| Dato | Cobertura |
+**Decisión.** Tres columnas con tres funciones:
+
+| Campo | Origen | Función |
+|---|---|---|
+| `fecha_actualizacion` | `updated` del feed | **Interna.** Ordena la paginación |
+| `fecha_publicacion` | `IssueDate` de CODICE | Cuánto lleva en la calle |
+| `fecha_limite` | `TenderSubmissionDeadlinePeriod` | Si aún se puede ofertar |
+
+**Trampa evitada.** La ventana adaptativa debe seguir apoyándose en
+`updated`, porque es el criterio con el que el feed ordena sus páginas.
+Cambiarla a `IssueDate` habría roto toda la paginación.
+
+**Un fallo de parseo que casi da un rodeo entero.** CODICE publica las
+fechas en el formato `date` de XML Schema, que admite zona horaria sin
+hora: `2026-06-09+02:00`. Es legal y correcto, y ni `dateutil` ni la
+librería estándar lo interpretan. Sin el arreglo, la fecha de publicación
+habría salido vacía casi siempre, se habría concluido que el feed no la
+trae, y se habría montado una descarga adicional para obtener un dato que
+ya estaba ahí.
+
+**Cobertura real: 26,8 %.** El feed transporta `IssueDate` en solo uno de
+cada cuatro casos. Predicción del arquitecto: más del 90 %. Segunda
+estimación optimista consecutiva sobre cobertura de campos.
+
+---
+
+## 22. El cribado semántico: tres iteraciones medidas
+
+**Diseño.** Tres salidas —`si`, `quizas`, `no`— y nunca dos. Un `no`
+equivocado es una oportunidad perdida en silencio, y es el único error de
+los tres que hace daño.
+
+**v1.** Dejaba pasar el 70 %, contra el 33 % de la clasificación manual.
+El `quizas` funcionaba como cajón de sastre. Fallos concretos: clasificó
+una gala deportiva como `si` razonando que era "un evento cultural", y
+dejó pasar la participación institucional en una feria educativa.
+
+**v2.** Reencuadre del criterio y exclusiones nuevas. Evaluada contra 20
+casos clasificados a mano: **16 aciertos de 20, y cero falsos negativos.**
+Los cuatro fallos iban todos en la misma dirección — `quizas` donde
+correspondía `no`.
+
+**v3.** La regla que resolvió los cuatro de golpe la formuló el Director
+de Proyecto: *¿podría mi cliente ser el **contratista principal** de este
+contrato?* No basta con que el contrato contenga actividad cultural; hay
+que preguntarse quién ejecutaría la mayor parte del encargo. Si es un
+monitor, un educador, un docente, un guía o un proveedor de bienes, no
+vale por muchas actividades culturales que incluya.
+
+**Resultado sobre 124 licitaciones vivas:**
+
+| Veredicto | Filas |
 |---|---|
-| Email de contacto del órgano | 92,6 % |
-| Con criterios de adjudicación | 86,5 % |
-| Criterios con ponderación numérica | **100 %** (1.227/1.227) |
-| Ponderaciones que suman 100 | 85,2 % |
-| Con requisitos de solvencia | 83,7 % |
-| Campos de solvencia **con contenido real** | **76,8 %** |
-| Garantía definitiva | 40,1 % |
+| sí | 16 |
+| quizás | 28 |
+| no | 80 |
 
-El expediente que motivó la hipótesis estaba en el 23 % que remite al
-pliego. Generalizar desde una muestra de uno fue el error.
+Auditados 20-30 rechazos a mano: ningún falso negativo.
 
-**Decisión.** El paso 3 deja de ser incondicional. **La detección de
-remisiones pasa de métrica a disparador:** solo se descarga el pliego
-cuando el campo de solvencia dice "véase la cláusula tal". Tres de cada
-cuatro licitaciones no necesitan descarga alguna.
+**El embudo completo:** 926 capturadas → 124 vivas → **44 relevantes.**
 
-```
-4a (cribado) → 5 (alerta completa)
-       └── ¿la solvencia es una remisión? ──sí──→ 3 → 4b
-```
+**Trazabilidad.** Cada veredicto se guarda con la versión del prompt y el
+modelo. Sin eso, comparar iteraciones es imposible y no se sabe de qué
+versión viene cada resultado.
 
-**Consecuencia de volumen.** El paso 3 pasa de procesar unas 60
-licitaciones diarias a unas 14, y son aquellas en las que aporta algo.
+**Coste.** Céntimos por cada centenar de clasificaciones con un modelo
+pequeño. La asimetría económica es la que gobierna todo el diseño: una
+llamada cuesta céntimos, una oportunidad perdida cuesta un cliente.
 
-**Hallazgo de producto no previsto.** El email del órgano de contratación
-viene en el 92,6 % de los casos. Convierte la alerta en acción inmediata:
-no solo "existe esta oportunidad", sino "y este es el correo de quien la
-convoca". No estaba en ningún plan.
+---
 
-**Matiz pendiente de medir.** El 76,8 % es porcentaje de *campos*, no de
-licitaciones. Una licitación con cuatro campos donde uno es remisión sigue
-teniendo un hueco. Para dimensionar el disparador del paso 3 hará falta la
-cifra por licitación, que será más alta.
+## 23. El fallo peligroso no es el que da error
 
-**Aviso metodológico.** Una remisión detectada por patrón de texto no es
-prueba de que falte contenido, ni su ausencia garantiza que el campo sea
-útil. El detector es una heurística calibrada contra seis ejemplos, no un
-clasificador validado.
+**Tres incidentes, el mismo patrón.** En un sistema desatendido, lo que
+hace daño no es el fallo ruidoso: es el que devuelve un resumen
+tranquilizador.
+
+1. **La ventana que decía siete días y cubría dos.** El tope de páginas
+   cortaba antes de que la ventana temporal actuara. Sin error, sin aviso.
+2. **El indicador que medía lo que no tocaba.** Informaba de la entrada
+   más antigua *leída*, no de la más antigua *aceptada*. Indujo a dar por
+   buenos datos que no existían.
+3. **El guardado que no guardaba.** El cribador clasificó 124
+   licitaciones, imprimió un reparto perfecto y terminó en verde con cero
+   filas escritas.
+
+**La causa técnica del tercero, que merece registrarse.** Se usaba
+`upsert` enviando solo las columnas a modificar, suponiendo que
+PostgreSQL, al encontrar la fila, actualizaría solo esas. Pero PostgreSQL
+**comprueba las restricciones `NOT NULL` sobre la fila propuesta antes de
+detectar el conflicto**, así que un envío sin `fuente` ni `titulo` se
+rechaza aunque la fila exista. La misma función de refresco de estados
+del lector arrastraba el bug y llevaba dos días sin escribir nada.
+
+**Correcciones.** `UPDATE` explícito en lugar de `upsert` parcial, y la
+ejecución **falla con error** si se clasifica y no se guarda nada.
+
+**Cómo se encontraron los tres.** Porque un número no cuadraba con otro y
+alguien preguntó. No hay sustituto para eso.
+
+**Un corolario sobre los informes.** El resumen del cribado listaba solo
+los `si` y `quizas`, con un tope de 40 filas. Los `no` —los únicos que
+importa auditar— quedaban siempre fuera. **No se puede auditar lo que no
+se muestra**, y el informe que oculta los rechazos es de la misma familia
+que el resumen tranquilizador.
 
 ---
 
@@ -427,3 +487,6 @@ Cosas conocidas que se decidió no hacer, y por qué.
 | Tabla de eventos de solo inserción para trazabilidad | No hay requisito legal activo todavía |
 | Integrar el canal de contratos menores | Decisión de producto pendiente, no técnica |
 | Cron externo para puntualidad garantizada | Esperando a confirmar si el de GitHub basta |
+| Estrechar el prefijo CPV `925` a museos y patrimonio | Arrastra destrucción documental: ~15 % de llamadas desperdiciadas |
+| Recortar el encabezado del pliego en títulos catalanes | Algunos títulos son la boilerplate del PCAP, sin señal para el cribado |
+| Refrescar el estado de las filas antiguas | Solo se refresca lo que reaparece en la ventana adaptativa |

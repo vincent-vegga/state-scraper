@@ -23,21 +23,22 @@ El sistema está concebido como un pipeline de cinco pasos:
 |---|---|---|
 | 1 | Conexión a feeds ATOM oficiales | ✅ Operativo |
 | 2 | Filtrado por CPV y control de estado | ✅ Operativo |
-| 4a | Cribado semántico sobre título, órgano y CPV | ⬜ Siguiente |
-| 5 | Alerta al usuario | ⬜ Pendiente |
-| 3 | Descarga de documentos, **solo si la solvencia remite al pliego** | ⬜ Mejora |
-| 4b | Extracción de requisitos del pliego | ⬜ Mejora |
+| 2b | Filtro por estado del expediente (solo `PUB`) | ✅ Operativo |
+| 4a | Cribado semántico con LLM | ✅ Operativo |
+| 5 | Alerta al usuario | ⬜ Siguiente |
+| 3 | Descarga de documentos, si la solvencia remite al pliego | ⬜ Mejora |
+| 4b | Extracción de requisitos del PDF | ⬜ Mejora |
 
 El orden de ejecución **no** es 1→2→3→4→5. El cribado semántico se adelanta
-a la descarga, y la descarga es condicional. Ver Decisiones 15 y 19 en
-`DECISIONES.md`:
+a la descarga de documentos, y la descarga es condicional. Ver Decisiones 15
+y 19 en `DECISIONES.md`:
 
 ```
-1 → 2 → 4a (cribado) → 5 (alerta completa)
-                 └── ¿la solvencia remite al pliego? ──sí──→ 3 → 4b
+1 → 2 → 2b → 4a (cribado) → 5 (alerta)
+                      └── ¿la solvencia remite al pliego? ──sí──→ 3 → 4b
 ```
 
-Los pasos 1 y 2 se ejecutan solos cada mañana y escriben en base de datos.
+Todo lo marcado como operativo se ejecuta solo cada mañana.
 
 ---
 
@@ -88,6 +89,7 @@ esperado, en lugar de degradarse discretamente.
 | `requirements.txt` | Dependencias de Python |
 | `.github/workflows/scraper.yml` | Programación y configuración del robot |
 | `DECISIONES.md` | Registro de decisiones de arquitectura y su motivo |
+| `cribador.py` | Paso 4a: cribado semántico con LLM |
 | `esquema.sql` | Esquema completo de la base de datos, reproducible |
 
 ---
@@ -127,6 +129,8 @@ parámetros disponibles:
   - `diagnostico`: lee los feeds, aplica los filtros e informa de cobertura
     de datos y reparto por CPV, **sin tocar la base de datos**. Es la forma
     de probar hipótesis sin consecuencias.
+  - `solo_cribado`: clasifica sin volver a leer los feeds.
+  - `cribado_prueba`: clasifica 20 y las imprime **sin guardar**.
 - **cpv_prefijos**: prefijos solo para esa ejecución. Vacío usa los del
   workflow.
 
@@ -141,6 +145,8 @@ Actions → ejecución → job → desplegar *Ejecutar el scraper*.
 | `Entrada más antigua leída` | Hasta dónde miró, aunque descartara |
 | `FRENO DE EMERGENCIA` | ⚠️ Posible hueco sin vigilar. Investigar |
 | `Ejecución completada` | Total de licitaciones nuevas guardadas |
+| `Refrescado el estado de` | Expedientes conocidos actualizados |
+| `Guardados N de M veredictos` | ⚠️ Si N ≠ M, se perdió trabajo |
 
 Los avisos en amarillo (`WARNING`) son los que importan. El aviso de
 obsolescencia de Node.js que emite GitHub es ajeno al proyecto.
@@ -159,6 +165,12 @@ Todo se ajusta desde `.github/workflows/scraper.yml`, sin tocar Python.
 | `MAX_PAGINAS_POR_FEED` | `25` | Freno de emergencia |
 | `UMBRAL_CORTE_PAGINA` | `0.9` | Cuándo dejar de paginar (calibrable) |
 | `SOLO_CATALUNYA_AGREGADO` | `true` | Filtro geográfico del canal agregado |
+| `MODELO_CRIBADO` | `gpt-4o-mini` | Modelo del paso 4a |
+| `MAX_CRIBADO_POR_EJECUCION` | `300` | Freno de gasto del cribado |
+| `VEREDICTOS_INFORME` | `si,quizas,no` | Qué secciones lista el informe |
+
+Credenciales, como *secrets* del repositorio: `SUPABASE_URL`,
+`SUPABASE_KEY` y `OPENAI_API_KEY`.
 
 Credenciales, como *secrets* del repositorio: `SUPABASE_URL` y
 `SUPABASE_KEY` (clave secreta con privilegios de servidor).
@@ -213,21 +225,6 @@ Medidas sobre 86 licitaciones reales (agosto de 2026, filtro
 | Órgano | 100 % |
 | Expediente | 100 % |
 | Código postal | 84,9 % |
-| Fecha límite de presentación | 95,0 % |
-| Email de contacto del órgano | 92,6 % |
-| Con al menos un documento referenciado | 90,5 % |
-| Con criterios de adjudicación | 86,5 % |
-| Con requisitos de solvencia | 83,7 % |
-| Garantía definitiva | 40,1 % |
-
-**Criterios de adjudicación:** 4,5 de media por licitación, el 100 % con
-ponderación numérica, y en el 85 % de los casos las ponderaciones suman
-100. **Requisitos de solvencia:** el 76,8 % de los campos trae contenido
-real; solo el 23,2 % remite al pliego en PDF.
-
-Medido sobre 317 licitaciones adicionales (ventana de 3 días):
-**3,6 documentos de media** por licitación, con pliego administrativo y
-pliego técnico presentes en prácticamente todas las que traen documentos.
 
 **Reparto del volumen por prefijo CPV:**
 
@@ -237,15 +234,29 @@ pliego técnico presentes en prácticamente todas las que traen documentos.
 | `7995` (eventos y ferias) | 50,0 % |
 | `925` (bibliotecas y museos) | 11,6 % |
 
-Tres consecuencias de producto:
+La cobertura del código postal por encima del 80 % hace viable el filtrado
+por provincia como funcionalidad de producto.
 
-1. La cobertura del código postal por encima del 80 % hace viable el
-   filtrado por provincia.
-2. Con plazo, criterios de adjudicación ponderados y solvencia, **el feed
-   no da para una alerta: da para un informe**, sin descargar nada.
-3. El email del órgano en el 92,6 % de los casos convierte la alerta en
-   acción inmediata: no solo "existe esta oportunidad", sino "y este es el
-   correo de quien la convoca".
+---
+
+## El embudo
+
+Medido sobre datos reales de agosto de 2026:
+
+| Etapa | Filas | Filtro |
+|---|---|---|
+| Capturado de los feeds | 926 | prefijo CPV |
+| Vivo | 124 | estado `PUB` y plazo abierto |
+| **Relevante** | **44** | cribado semántico |
+
+De 926 a 44. Cada etapa elimina una clase distinta de ruido, y ninguna
+podría hacer el trabajo de las otras: el CPV no distingue un concierto de
+una corrida de toros, el estado no distingue lo relevante de lo
+irrelevante, y el modelo no sabría por sí solo si un expediente sigue
+abierto.
+
+Del volumen final, **una de cada tres licitaciones vivas del nicho resulta
+relevante**. Eso es una alerta útil, no una lista.
 
 ---
 
@@ -259,13 +270,17 @@ Tres consecuencias de producto:
 - **No hay recuperación de histórico.** La ventana adaptativa mantiene la
   continuidad hacia delante pero no rellena huecos anteriores. Requeriría
   procesar los ZIP mensuales que publica Hacienda.
+- **La fecha límite de presentación no viene en el feed.** Está en el
+  pliego, que es el objeto del paso 3.
 - **El filtro de procedencia catalana es heurístico**, basado en dominios y
   nombres de órgano. Puede dejar escapar entidades con dominio propio.
-- **Los pliegos son PDF.** El XML de la plataforma es el anuncio
-  estructurado, no el pliego: lo referencia y da su huella, pero no lo
-  contiene. El paso 4b necesitará extracción de PDF.
-- **La solvencia remite al pliego en el 23 % de los campos.** Ese es el
-  contenido que solo existe en PDF.
+- **El estado solo se refresca en lo que reaparece** en la ventana
+  adaptativa. Las filas antiguas conservan el estado del día en que se
+  vieron hasta que su expediente vuelva a moverse.
+- **El prefijo CPV `925` arrastra destrucción documental**, porque incluye
+  archivos. El cribado lo rechaza bien, pero desperdicia llamadas.
+- **Algunos títulos catalanes son el encabezado del pliego**, no una
+  descripción. El cribado clasifica esos casos con muy poca señal.
 
 ---
 
