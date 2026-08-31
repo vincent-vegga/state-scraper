@@ -29,6 +29,8 @@ on:
         options:
           - normal
           - diagnostico
+          - solo_cribado
+          - cribado_prueba
       cpv_prefijos:
         description: 'Prefijos CPV solo para esta ejecución (vacío = los de siempre)'
         required: false
@@ -57,6 +59,12 @@ jobs:
       # ejecución y los enmascara automáticamente en los registros.
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      # Paso 4a. La clave nunca aparece en el código ni en los registros.
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      # Modelo del cribado. Cambiarlo es editar esta línea.
+      MODELO_CRIBADO: 'gpt-4o-mini'
+      # Tope de llamadas por ejecución: freno de gasto, no de calidad.
+      MAX_CRIBADO_POR_EJECUCION: '300'
       # Filtro geográfico del canal agregado. Ponlo a 'false' si algún
       # día quieres cubrir todas las comunidades autónomas.
       SOLO_CATALUNYA_AGREGADO: 'true'
@@ -107,7 +115,15 @@ jobs:
 
       - name: Ejecutar el scraper
         id: scraper
+        if: inputs.modo != 'solo_cribado' && inputs.modo != 'cribado_prueba'
         run: python lector_atom.py ${{ inputs.modo == 'diagnostico' && '--diagnostico' || '' }}
+
+      - name: Cribado semántico (paso 4a)
+        id: cribado
+        # No se ejecuta en diagnóstico: ese modo no toca nada ni gasta saldo.
+        if: inputs.modo != 'diagnostico'
+        run: |
+          python cribador.py ${{ inputs.modo == 'cribado_prueba' && '--muestra 20' || '' }}
 
       - name: Comprobar que el repositorio sigue limpio
         run: |
