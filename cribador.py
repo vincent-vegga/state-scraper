@@ -55,7 +55,7 @@ MODELO = os.environ.get("MODELO_CRIBADO", "gpt-4o-mini")
 # Versión del prompt. SUBIR ESTE NÚMERO cada vez que se cambie el
 # texto de abajo: es lo que permite comparar iteraciones y saber de
 # qué versión viene cada veredicto guardado.
-VERSION_PROMPT = "v1"
+VERSION_PROMPT = "v2"
 
 TABLA = "licitaciones"
 VISTA_PENDIENTES = "licitaciones_por_cribar"
@@ -85,61 +85,75 @@ grupos, cantautores, humoristas, compañías de teatro y danza, productoras \
 de eventos culturales, técnicos de sonido e iluminación, empresas de \
 montaje escénico y de producción de exposiciones.
 
-Tu tarea es decidir si un contrato público es una oportunidad de negocio \
-para ese cliente.
+LA PREGUNTA QUE DEBES RESPONDER NO ES "¿esto tiene que ver con la cultura?" \
+sino "¿PODRÍA MI CLIENTE EJECUTAR LA PRESTACIÓN PRINCIPAL de este \
+contrato?". Muchos contratos ocurren en un contexto festivo o cultural sin \
+que el trabajo en sí sea de producción artística: esos NO valen.
 
-RESPONDE "si" cuando el contrato consista en:
-- Actuaciones artísticas, conciertos, espectáculos o programación cultural.
-- Producción, coordinación técnica o dirección de eventos culturales, \
-festivales o fiestas populares.
-- Servicios técnicos ligados a un espectáculo: sonido, iluminación, \
-escenografía, montaje escénico.
-- Producción y montaje de exposiciones (no su mero transporte o custodia).
+Fíjate siempre en el OBJETO PRINCIPAL del contrato, no en el contexto ni en \
+las palabras sueltas del título.
+
+RESPONDE "si" solo cuando el objeto PRINCIPAL sea:
+- Ejecutar actuaciones artísticas, conciertos o espectáculos en vivo.
+- Producir, dirigir o coordinar técnicamente un evento cultural, festival o \
+programación escénica.
+- Prestar servicios técnicos de espectáculo: sonido, iluminación, \
+escenografía, montaje escénico, regiduría.
+- Producir y montar una exposición.
 
 RESPONDE "quizas" cuando:
-- Sea un contrato amplio ("ómnibus") que incluye programación o dinamización \
-cultural junto a otras prestaciones.
-- Haya componente cultural o escénico claro pero el papel exacto del \
-contratista no se deduzca del título.
-- Sean servicios auxiliares o de comunicación asociados a un festival o \
-espectáculo concreto.
+- El contrato incluya producción o programación cultural junto a otras \
+prestaciones ajenas (contrato "ómnibus").
+- Haya componente escénico o de producción, pero el objeto principal sea \
+otro o no se deduzca del título.
+- Sean servicios auxiliares o de comunicación de un festival o espectáculo \
+concreto.
+- Se organice un evento no cultural (institucional, deportivo, académico) \
+pero que requiere producción y medios técnicos escénicos.
 
-RESPONDE "no" cuando el contrato sea de:
+RESPONDE "no" cuando el objeto principal sea:
 - Espectáculos taurinos de cualquier tipo.
-- Hostelería, catering, explotación de barras o restauración.
-- Ferias comerciales, stands promocionales, promoción turística.
-- Mercados y mercadillos, incluidos los navideños y los de feriantes.
+- Hostelería, catering, barras o restauración.
+- Ferias comerciales, stands, promoción turística o participación \
+institucional en ferias, sea cual sea el sector de la feria.
+- Mercados y mercadillos, incluidos navideños y de feriantes.
 - Visitas guiadas, atención al visitante, auxiliares de sala de museo.
-- Bibliotecas, archivos y gestión documental.
-- Alquiler o arrendamiento de material sin componente de producción \
-(carpas, carrozas, mobiliario).
-- Control de acceso, seguridad, limpieza o mantenimiento de instalaciones.
+- Bibliotecas, archivos, gestión, custodia o destrucción de documentación.
+- ENSEÑANZA o formación artística: escuelas de música, teatro o danza, \
+talleres y clases. Enseñar no es actuar.
+- Actividades deportivas, saludables, de ocio infantil o socioeducativas \
+sin componente escénico.
+- Alquiler o arrendamiento de material sin producción (carpas, carrozas, \
+mobiliario, estructuras).
+- Control de acceso, seguridad, limpieza, vigilancia o mantenimiento.
 - Obras, construcción o reforma de inmuebles.
-- Artes plásticas, escultura, diseño gráfico o concursos de proyectos \
-sin componente de espectáculo en vivo.
+- Artes plásticas, escultura o diseño gráfico sin espectáculo en vivo.
 
-REGLA DE ORO: ante la duda razonable, responde "quizas", nunca "no". \
-Perder una oportunidad real es mucho más grave que mostrar una de más.
+REGLA DE ORO: entre "quizas" y "no", ante duda razonable elige "quizas". \
+Pero entre "si" y "quizas", exige que el objeto principal sea inequívoco \
+para decir "si". Perder una oportunidad es grave; llamar "si" a lo que solo \
+es "quizas" hace inútil la distinción.
 
 Devuelve EXCLUSIVAMENTE un objeto JSON, sin texto alrededor ni marcas de \
 código, con esta forma:
 {"veredicto": "si|quizas|no", "motivo": "una frase breve en español"}\
 """
 
-# Casos reales clasificados a mano. Enseñan la frontera.
+# Casos reales clasificados a mano, más los fallos detectados en la v1.
 EJEMPLOS: list[tuple[str, str, str]] = [
     ("Contrato para la producción de conciertos en la semana grande de Laredo 2026",
      "si", "Producción directa de conciertos."),
+    ("Serveis de producció, regidoria, coordinació tècnica i execució d'activitats "
+     "culturals",
+     "si", "Producción y regiduría de actividades culturales."),
     ("Servicios de organización, gestión y explotación de espectáculos taurinos "
      "Fiestas del Cristo 2026",
      "no", "Espectáculo taurino."),
     ("Contracte de serveis d'auxiliars d'espai per a les Festes de la Mercè 2026",
-     "quizas", "Servicios auxiliares en un festival: encaja según el alcance."),
+     "quizas", "Servicios auxiliares en un festival: depende del alcance."),
     ("Servicio de producción, montaje y desmontaje de la exposición temporal "
      "'La ilusión de la simetría'",
      "quizas", "Producción de exposición: encaja a nivel de producción."),
-    ("Transporte, montaje y desmontaje de la Exposición Temporal - La Fragata",
-     "quizas", "Montaje de exposición, aunque con fuerte componente logístico."),
     ("Uso temporal de terrenos del Recinto Ferial para la instalación de una barra",
      "no", "Explotación de barra: hostelería."),
     ("Organización, programación, desarrollo y ejecución de la programación de "
@@ -148,11 +162,20 @@ EJEMPLOS: list[tuple[str, str, str]] = [
     ("Contratación de una empresa especializada en diseño, montaje y alquiler de "
      "carrozas para cabalgatas",
      "no", "Alquiler de material sin producción artística."),
-    ("Servicio de coordinación y gestión de los servicios bibliotecarios municipales",
-     "no", "Servicios bibliotecarios."),
-    ("Servicios de coordinación técnica, producción y servicios técnicos "
-     "especializados para la celebración de un evento",
-     "si", "Coordinación técnica y producción de evento."),
+    # --- Fallos corregidos respecto a la v1 ---
+    ("Organización de la Gala del Deporte de Xirivella",
+     "quizas", "Gala no cultural, pero requiere producción y medios técnicos."),
+    ("Servicios necesarios para la participación del Ministerio de Educación en "
+     "una feria educativa",
+     "no", "Participación institucional en feria."),
+    ("Contrato de Servicios de la Gestión y Desarrollo de las clases de Bailes de "
+     "Salón",
+     "no", "Enseñanza de baile, no espectáculo."),
+    ("Contrato Mixto de Servicio de recogida y destrucción de documentación "
+     "confidencial",
+     "no", "Gestión documental."),
+    ("Servicio de actividades saludables",
+     "no", "Actividad deportiva o de salud sin componente escénico."),
 ]
 
 
