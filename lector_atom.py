@@ -1141,9 +1141,14 @@ def procesar_fuentes(cliente, diagnostico: bool) -> tuple[list[dict[str, Any]], 
                 acumuladas.extend(unicas)
                 continue
 
-            nuevas = filtrar_ya_procesadas(cliente, unicas)
+            nuevas, conocidas = filtrar_ya_procesadas(cliente, unicas)
             if nuevas:
                 guardar_licitaciones(cliente, nuevas)
+            # Las conocidas no se alertan, pero se les refresca el estado:
+            # de lo contrario la tabla ofrecería como vivas licitaciones ya
+            # adjudicadas o formalizadas.
+            if conocidas:
+                refrescar_conocidas(cliente, conocidas)
             acumuladas.extend(nuevas)
 
         except Exception as error:
@@ -1234,15 +1239,23 @@ def fecha_ultima_guardada(cliente, fuente: str) -> datetime | None:
         return None
 
 
-def filtrar_ya_procesadas(cliente, candidatas: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def filtrar_ya_procesadas(
+    cliente, candidatas: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """
-    Consulta la memoria y devuelve solo las licitaciones nunca vistas.
+    Separa las candidatas en (nunca vistas, ya conocidas).
+
+    Las conocidas no generan alerta, pero SÍ hay que refrescarles el estado:
+    un expediente se mueve de PUB a EV, a ADJ y a RES a lo largo de su vida.
+    Si solo se insertara la primera vez, la tabla quedaría congelada en la
+    foto del día en que se vio y seguiría ofreciendo como oportunidad algo
+    que ya está adjudicado.
 
     Se pregunta por lotes: una consulta con miles de identificadores en una
     sola petición superaría el límite de longitud de la URL.
     """
     if not candidatas:
-        return []
+        return [], []
 
     identificadores = [c["id_licitacion"] for c in candidatas]
     ya_conocidas: set[str] = set()
@@ -1264,9 +1277,53 @@ def filtrar_ya_procesadas(cliente, candidatas: list[dict[str, Any]]) -> list[dic
             ya_conocidas.update(lote)
 
     nuevas = [c for c in candidatas if c["id_licitacion"] not in ya_conocidas]
+    conocidas = [c for c in candidatas if c["id_licitacion"] in ya_conocidas]
     logging.info("Control de estado: %d candidatas, %d ya conocidas, %d nuevas.",
-                 len(candidatas), len(candidatas) - len(nuevas), len(nuevas))
-    return nuevas
+                 len(candidatas), len(conocidas), len(nuevas))
+    return nuevas, conocidas
+
+
+def refrescar_conocidas(cliente, conocidas: list[dict[str, Any]]) -> int:
+    """
+    Actualiza los campos que cambian con el tiempo en licitaciones ya vistas.
+
+    Solo se envían las columnas mutables: el estado, el plazo, el importe y
+    la fecha de actualización. Todo lo demás —y en particular
+    `estado_pipeline`, que gobierna la cola de trabajo— se deja intacto,
+    porque PostgREST solo sobrescribe las columnas que recibe.
+
+    No genera alertas: refrescar no es descubrir.
+    """
+    if not conocidas:
+        return 0
+
+    filas = [
+        {
+            "id_licitacion": item["id_licitacion"],
+            "estado_licitacion": item["estado_licitacion"] or None,
+            "estado_nombre": item.get("estado_nombre") or None,
+            "fecha_limite": item.get("fecha_limite"),
+            "presupuesto": item["presupuesto"],
+            "fecha_actualizacion": (
+                f.isoformat() if (f := a_fecha(item["fecha_actualizacion"])) else None
+            ),
+        }
+        for item in conocidas
+    ]
+
+    refrescadas = 0
+    for lote in dividir_en_lotes(filas, TAMANO_LOTE_SUPABASE):
+        try:
+            cliente.table(TABLA_SUPABASE).upsert(
+                list(lote), on_conflict="id_licitacion"
+            ).execute()
+            refrescadas += len(lote)
+        except Exception as error:
+            logging.error("Refresco fallido en un lote de %d filas: %s",
+                          len(lote), error)
+
+    logging.info("Refrescado el estado de %d licitaciones ya conocidas.", refrescadas)
+    return refrescadas
 
 
 def guardar_licitaciones(cliente, nuevas: list[dict[str, Any]]) -> int:
