@@ -55,7 +55,7 @@ MODELO = os.environ.get("MODELO_CRIBADO", "gpt-4o-mini")
 # Versión del prompt. SUBIR ESTE NÚMERO cada vez que se cambie el
 # texto de abajo: es lo que permite comparar iteraciones y saber de
 # qué versión viene cada veredicto guardado.
-VERSION_PROMPT = "v2"
+VERSION_PROMPT = "v3"
 
 TABLA = "licitaciones"
 VISTA_PENDIENTES = "licitaciones_por_cribar"
@@ -86,9 +86,15 @@ de eventos culturales, técnicos de sonido e iluminación, empresas de \
 montaje escénico y de producción de exposiciones.
 
 LA PREGUNTA QUE DEBES RESPONDER NO ES "¿esto tiene que ver con la cultura?" \
-sino "¿PODRÍA MI CLIENTE EJECUTAR LA PRESTACIÓN PRINCIPAL de este \
-contrato?". Muchos contratos ocurren en un contexto festivo o cultural sin \
-que el trabajo en sí sea de producción artística: esos NO valen.
+sino "¿PODRÍA MI CLIENTE SER EL CONTRATISTA PRINCIPAL de este contrato?".
+
+Esa es la prueba decisiva y se aplica siempre. No basta con que el contrato \
+contenga actividades culturales: hay que preguntarse quién ejecutaría la \
+mayor parte del encargo. Si esa persona es un productor de espectáculos, un \
+técnico de sonido o iluminación, una compañía o un artista, el contrato \
+vale. Si es un monitor de ocio, un educador, un docente, un guía, un \
+comercial, un instalador o un proveedor de bienes, NO vale, por muchas \
+actividades culturales que incluya.
 
 Fíjate siempre en el OBJETO PRINCIPAL del contrato, no en el contexto ni en \
 las palabras sueltas del título.
@@ -111,6 +117,11 @@ concreto.
 - Se organice un evento no cultural (institucional, deportivo, académico) \
 pero que requiere producción y medios técnicos escénicos.
 
+NO uses "quizas" como cajón de sastre. Si al aplicar la prueba del \
+contratista principal la respuesta es claramente que NO sería un profesional \
+del espectáculo, responde "no" aunque el contrato mencione cultura, fiestas \
+o actividades.
+
 RESPONDE "no" cuando el objeto principal sea:
 - Espectáculos taurinos de cualquier tipo.
 - Hostelería, catering, barras o restauración.
@@ -121,8 +132,13 @@ institucional en ferias, sea cual sea el sector de la feria.
 - Bibliotecas, archivos, gestión, custodia o destrucción de documentación.
 - ENSEÑANZA o formación artística: escuelas de música, teatro o danza, \
 talleres y clases. Enseñar no es actuar.
-- Actividades deportivas, saludables, de ocio infantil o socioeducativas \
-sin componente escénico.
+- Actividades deportivas, saludables, de ocio infantil, animación, \
+socioeducativas o de atención a personas: el contratista sería un monitor o \
+un educador, no un profesional del espectáculo.
+- Contratos mixtos cuya prestación principal es el suministro o la \
+instalación de bienes, aunque se destinen a un evento festivo.
+- Programas de residencias, becas o convocatorias artísticas: el \
+contratista gestiona un programa, no produce un espectáculo.
 - Alquiler o arrendamiento de material sin producción (carpas, carrozas, \
 mobiliario, estructuras).
 - Control de acceso, seguridad, limpieza, vigilancia o mantenimiento.
@@ -176,6 +192,16 @@ EJEMPLOS: list[tuple[str, str, str]] = [
      "no", "Gestión documental."),
     ("Servicio de actividades saludables",
      "no", "Actividad deportiva o de salud sin componente escénico."),
+    # --- Fallos corregidos respecto a la v2: el "quizás" era un cajón ---
+    ("Servei de producció global del Saló Infantil Adrilàndia",
+     "no", "Ocio infantil: el contratista sería un animador, no un productor."),
+    ("Contractació mixta de la prestació de serveis i subministrament "
+     "d'elements per a un esdeveniment festiu",
+     "no", "La prestación principal es el suministro de bienes."),
+    ("Servicio de creación y ejecución del programa 'Residencias creativas'",
+     "no", "Gestión de un programa de residencias, no producción de espectáculo."),
+    ("Organització d'un esdeveniment cultural relacionat amb el món literari",
+     "no", "Evento literario: el contratista sería un gestor cultural."),
 ]
 
 
