@@ -67,6 +67,16 @@ ESPERA_REINTENTO = 4  # segundos, se duplica en cada intento
 
 VEREDICTOS_VALIDOS = {"si", "quizas", "no"}
 
+# Qué veredictos se listan en el informe de GitHub Actions, y cuántos de
+# cada uno. Por secciones, para que auditar los "no" no dependa de que
+# quepan detrás de los demás. Para revisar solo los rechazos:
+#   VEREDICTOS_INFORME=no
+VEREDICTOS_INFORME = [
+    v.strip() for v in os.environ.get("VEREDICTOS_INFORME", "si,quizas,no").split(",")
+    if v.strip() in VEREDICTOS_VALIDOS
+] or ["si", "quizas", "no"]
+MAX_FILAS_POR_VEREDICTO = int(os.environ.get("MAX_FILAS_POR_VEREDICTO", "60"))
+
 
 # ==============================================================
 # 2. EL PROMPT
@@ -365,35 +375,56 @@ def leer_pendientes(cliente, limite: int) -> list[dict[str, Any]]:
 
 def guardar_veredictos(cliente, resultados: list[dict[str, Any]]) -> int:
     """
-    Escribe los veredictos.
+    Escribe los veredictos con UPDATE, no con upsert.
 
-    Solo se envían las columnas del cribado: PostgREST deja intactas las
-    que no recibe, así que no se pisa nada de lo que guardó el scraper.
+    El upsert parcial no vale aquí: PostgreSQL comprueba las restricciones
+    NOT NULL sobre la fila propuesta ANTES de detectar el conflicto, así que
+    un envío sin `fuente` ni `titulo` se rechaza aunque la fila ya exista y
+    la operación fuese a resolverse como actualización.
+
+    Una petición por fila. Es más lenta que un lote, pero es la operación
+    correcta: aquí nunca queremos insertar, solo actualizar lo que ya está.
     """
     if not resultados:
         return 0
 
     ahora = datetime.now(timezone.utc).isoformat()
-    filas = [
-        {
-            "id_licitacion": r["id_licitacion"],
-            "cribado_veredicto": r["veredicto"],
-            "cribado_motivo": r["motivo"],
+    guardados = 0
+    fallos = 0
+
+    for indice, resultado in enumerate(resultados, 1):
+        cambios = {
+            "cribado_veredicto": resultado["veredicto"],
+            "cribado_motivo": resultado["motivo"],
             "cribado_fecha": ahora,
             "cribado_version": VERSION_PROMPT,
             "cribado_modelo": MODELO,
         }
-        for r in resultados
-    ]
-
-    guardados = 0
-    for lote in dividir_en_lotes(filas, TAMANO_LOTE_ESCRITURA):
         try:
-            cliente.table(TABLA).upsert(list(lote), on_conflict="id_licitacion").execute()
-            guardados += len(lote)
+            respuesta = (
+                cliente.table(TABLA)
+                .update(cambios)
+                .eq("id_licitacion", resultado["id_licitacion"])
+                .execute()
+            )
+            if respuesta.data:
+                guardados += 1
+            else:
+                # Sin filas afectadas: el identificador no existe. Es raro,
+                # pero silenciarlo dejaría veredictos perdidos sin rastro.
+                fallos += 1
+                logging.warning("Sin fila que actualizar: %s",
+                                resultado["id_licitacion"][:80])
         except Exception as error:
-            logging.error("Fallo al guardar un lote de %d veredictos: %s",
-                          len(lote), error)
+            fallos += 1
+            logging.error("Fallo al guardar el veredicto de %s: %s",
+                          resultado["id_licitacion"][:60], error)
+
+        if indice % 50 == 0:
+            logging.info("  Guardados %d/%d...", guardados, len(resultados))
+
+    if fallos:
+        logging.error("%d veredictos NO se han guardado.", fallos)
     return guardados
 
 
@@ -411,26 +442,34 @@ def publicar_informe(resultados: list[dict[str, Any]]) -> None:
     ruta = os.environ.get("GITHUB_STEP_SUMMARY")
     if not ruta or not total:
         return
+
+    etiquetas = {"si": "Sí", "quizas": "Quizás", "no": "No (auditar)"}
     try:
         with open(ruta, "a", encoding="utf-8") as fichero:
             fichero.write(f"\n## Cribado ({VERSION_PROMPT}, {MODELO})\n\n")
             fichero.write(f"Clasificadas **{total}** · "
                           f"sí {reparto.get('si', 0)} · "
                           f"quizás {reparto.get('quizas', 0)} · "
-                          f"no {reparto.get('no', 0)}\n\n")
-            # Se listan TODOS, incluidos los "no". Un "no" equivocado es una
-            # oportunidad perdida en silencio, y es el único error grave de
-            # los tres posibles: si no se puede auditar, no se detecta.
-            relevantes = sorted(resultados,
-                                key=lambda r: {"si": 0, "quizas": 1, "no": 2}[r["veredicto"]])
-            if relevantes:
-                fichero.write("| Veredicto | Título | Motivo |\n|---|---|---|\n")
-                for r in relevantes[:40]:
+                          f"no {reparto.get('no', 0)}\n")
+
+            # Una sección por veredicto. Antes iban en una sola tabla con
+            # tope de 40 filas, así que los "no" nunca llegaban a verse:
+            # quedaban detrás de los síes y los quizás.
+            for veredicto in VEREDICTOS_INFORME:
+                grupo = [r for r in resultados if r["veredicto"] == veredicto]
+                if not grupo:
+                    continue
+                fichero.write(f"\n### {etiquetas[veredicto]} ({len(grupo)})\n\n")
+                fichero.write("| Título | Motivo |\n|---|---|\n")
+                for r in grupo[:MAX_FILAS_POR_VEREDICTO]:
                     titulo = r["titulo"][:200].replace("|", "/")
                     motivo = r["motivo"][:200].replace("|", "/")
                     enlace = r.get("enlace", "")
                     celda = f"[{titulo}]({enlace})" if enlace else titulo
-                    fichero.write(f"| {r['veredicto']} | {celda} | {motivo} |\n")
+                    fichero.write(f"| {celda} | {motivo} |\n")
+                if len(grupo) > MAX_FILAS_POR_VEREDICTO:
+                    fichero.write(f"\n_...y {len(grupo) - MAX_FILAS_POR_VEREDICTO} "
+                                  f"más. Consulta Supabase._\n")
     except OSError as error:
         logging.warning("No se pudo escribir el informe: %s", error)
 
@@ -508,7 +547,15 @@ def main() -> int:
         return 0
 
     guardados = guardar_veredictos(cliente, resultados)
-    logging.info("Guardados %d veredictos.", guardados)
+    logging.info("Guardados %d de %d veredictos.", guardados, len(resultados))
+
+    # Si se clasificó pero no se guardó nada, la ejecución DEBE fallar. Un
+    # resumen tranquilizador sobre un guardado fallido es peor que un error:
+    # el trabajo se pierde y nadie se entera hasta días después.
+    if resultados and guardados == 0:
+        logging.error("Se clasificaron %d licitaciones y no se guardó ninguna.",
+                      len(resultados))
+        return 1
     return 0
 
 

@@ -1287,19 +1287,24 @@ def refrescar_conocidas(cliente, conocidas: list[dict[str, Any]]) -> int:
     """
     Actualiza los campos que cambian con el tiempo en licitaciones ya vistas.
 
-    Solo se envían las columnas mutables: el estado, el plazo, el importe y
-    la fecha de actualización. Todo lo demás —y en particular
-    `estado_pipeline`, que gobierna la cola de trabajo— se deja intacto,
-    porque PostgREST solo sobrescribe las columnas que recibe.
+    Un expediente se mueve de PUB a EV, a ADJ y a RES a lo largo de su vida.
+    Sin este refresco la tabla quedaría congelada en la foto del día en que
+    se vio y seguiría ofreciendo como oportunidad algo ya adjudicado.
+
+    Se usa UPDATE y no upsert: PostgreSQL comprueba las restricciones NOT
+    NULL sobre la fila propuesta ANTES de detectar el conflicto, así que un
+    upsert sin `fuente` ni `titulo` se rechaza aunque la fila ya exista.
 
     No genera alertas: refrescar no es descubrir.
     """
     if not conocidas:
         return 0
 
-    filas = [
-        {
-            "id_licitacion": item["id_licitacion"],
+    refrescadas = 0
+    fallos = 0
+
+    for item in conocidas:
+        cambios = {
             "estado_licitacion": item["estado_licitacion"] or None,
             "estado_nombre": item.get("estado_nombre") or None,
             "fecha_limite": item.get("fecha_limite"),
@@ -1308,20 +1313,23 @@ def refrescar_conocidas(cliente, conocidas: list[dict[str, Any]]) -> int:
                 f.isoformat() if (f := a_fecha(item["fecha_actualizacion"])) else None
             ),
         }
-        for item in conocidas
-    ]
-
-    refrescadas = 0
-    for lote in dividir_en_lotes(filas, TAMANO_LOTE_SUPABASE):
         try:
-            cliente.table(TABLA_SUPABASE).upsert(
-                list(lote), on_conflict="id_licitacion"
-            ).execute()
-            refrescadas += len(lote)
+            respuesta = (
+                cliente.table(TABLA_SUPABASE)
+                .update(cambios)
+                .eq("id_licitacion", item["id_licitacion"])
+                .execute()
+            )
+            if respuesta.data:
+                refrescadas += 1
         except Exception as error:
-            logging.error("Refresco fallido en un lote de %d filas: %s",
-                          len(lote), error)
+            fallos += 1
+            if fallos <= 3:   # no inundar el registro con el mismo error
+                logging.error("Fallo al refrescar %s: %s",
+                              item["id_licitacion"][:60], error)
 
+    if fallos:
+        logging.error("%d licitaciones no se pudieron refrescar.", fallos)
     logging.info("Refrescado el estado de %d licitaciones ya conocidas.", refrescadas)
     return refrescadas
 
