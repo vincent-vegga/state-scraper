@@ -1,9 +1,11 @@
 # ============================================================
-# STATE SCRAPER v2 - Dependencias (Pasos 1 y 2)
+# STATE SCRAPER v3 - Dependencias
 # ============================================================
 # Versiones acotadas: ">=" para recibir parches de seguridad,
 # "<" para que una version mayor con cambios incompatibles no
 # rompa el robot de madrugada sin avisar a nadie.
+
+# --- Pasos 1 y 2: lectura de feeds --------------------------
 
 # Descarga de los feeds por HTTPS, con timeouts y reintentos.
 requests>=2.32,<3
@@ -14,9 +16,16 @@ requests>=2.32,<3
 # namespaces que quedaria obsoleto en cada version del esquema.
 lxml>=5.2,<7
 
-# Cliente oficial de Supabase: unico destino de los datos.
-supabase>=2.10,<3
-
 # Interpretacion robusta de fechas ISO 8601 con zonas horarias
 # y formatos ligeramente irregulares entre publicadores.
 python-dateutil>=2.9,<3
+
+# --- Almacen comun ------------------------------------------
+
+# Cliente oficial de Supabase: unico destino de los datos.
+supabase>=2.10,<3
+
+# --- Paso 4a: cribado semantico -----------------------------
+
+# Cliente de OpenAI para la clasificacion de relevancia.
+openai>=1.40,<2
