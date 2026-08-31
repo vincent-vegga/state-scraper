@@ -392,13 +392,19 @@ def publicar_informe(resultados: list[dict[str, Any]]) -> None:
                           f"sí {reparto.get('si', 0)} · "
                           f"quizás {reparto.get('quizas', 0)} · "
                           f"no {reparto.get('no', 0)}\n\n")
-            relevantes = [r for r in resultados if r["veredicto"] in ("si", "quizas")]
+            # Se listan TODOS, incluidos los "no". Un "no" equivocado es una
+            # oportunidad perdida en silencio, y es el único error grave de
+            # los tres posibles: si no se puede auditar, no se detecta.
+            relevantes = sorted(resultados,
+                                key=lambda r: {"si": 0, "quizas": 1, "no": 2}[r["veredicto"]])
             if relevantes:
                 fichero.write("| Veredicto | Título | Motivo |\n|---|---|---|\n")
                 for r in relevantes[:40]:
-                    titulo = r["titulo"][:80].replace("|", "/")
-                    motivo = r["motivo"][:70].replace("|", "/")
-                    fichero.write(f"| {r['veredicto']} | {titulo} | {motivo} |\n")
+                    titulo = r["titulo"][:200].replace("|", "/")
+                    motivo = r["motivo"][:200].replace("|", "/")
+                    enlace = r.get("enlace", "")
+                    celda = f"[{titulo}]({enlace})" if enlace else titulo
+                    fichero.write(f"| {r['veredicto']} | {celda} | {motivo} |\n")
     except OSError as error:
         logging.warning("No se pudo escribir el informe: %s", error)
 
@@ -450,13 +456,20 @@ def main() -> int:
         resultados.append({
             "id_licitacion": licitacion["id_licitacion"],
             "titulo": licitacion.get("titulo", ""),
+            "enlace": licitacion.get("enlace", ""),
             **veredicto,
         })
 
         if es_prueba or indice % 25 == 0:
+            # En prueba se imprime todo sin recortar y con el enlace: la
+            # verificación a mano se hace abriendo el expediente, que es lo
+            # que ve un usuario real al decidir.
+            titulo = licitacion.get("titulo", "")
             logging.info("  [%3d/%d] %-6s · %s",
                          indice, len(pendientes), veredicto["veredicto"],
-                         licitacion.get("titulo", "")[:75])
+                         titulo if es_prueba else titulo[:75])
+            if es_prueba and licitacion.get("enlace"):
+                logging.info("           %s", licitacion["enlace"])
 
     if fallos:
         logging.warning("%d licitaciones sin veredicto. Se reintentarán "
