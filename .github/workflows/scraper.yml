@@ -1,10 +1,14 @@
 # ============================================================
-# STATE SCRAPER v2 · Robot diario (Pasos 1 y 2)
+# STATE SCRAPER · Robot diario
 # ============================================================
-# Cada mañana GitHub enciende un ordenador en la nube, instala
-# Python, ejecuta el scraper y escribe los resultados EN SUPABASE.
-# El repositorio no recibe ningún commit automático: aquí solo
-# vive el código.
+# Cada mañana GitHub enciende un ordenador en la nube, lee los
+# feeds, criba con el modelo, y publica la interfaz en GitHub
+# Pages.
+#
+# El repositorio NO recibe ningún commit automático, ni siquiera
+# de la web: Pages se despliega desde un artefacto, así que los
+# datos se sirven sin llegar a guardarse en ninguna rama. Aquí
+# solo vive código.
 
 name: Scraper de licitaciones (eventos y cultura)
 
@@ -130,7 +134,22 @@ jobs:
         if: inputs.modo != 'diagnostico'
         run: python generar_interfaz.py
 
-      - name: Publicar la interfaz como artefacto descargable
+      - name: Preparar el sitio para publicar
+        if: inputs.modo != 'diagnostico'
+        run: |
+          mkdir -p sitio
+          cp interfaz.html sitio/index.html
+          # Sin este fichero, GitHub procesa el sitio con Jekyll y puede
+          # alterar el HTML. Le decimos que lo sirva tal cual.
+          touch sitio/.nojekyll
+
+      - name: Subir el sitio como artefacto de Pages
+        if: inputs.modo != 'diagnostico'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: sitio
+
+      - name: Guardar también una copia descargable
         if: inputs.modo != 'diagnostico'
         uses: actions/upload-artifact@v4
         with:
@@ -143,7 +162,7 @@ jobs:
         run: |
           # interfaz.html es un artefacto de salida, no código: se genera
           # en cada ejecución y se descarga aparte. No debe subirse nunca.
-          rm -f interfaz.html
+          rm -rf interfaz.html sitio
           if [ -n "$(git status --porcelain)" ]; then
             echo "::warning::El scraper ha dejado ficheros sin rastrear:"
             git status --porcelain
@@ -151,3 +170,36 @@ jobs:
           else
             echo "Repositorio inmaculado. Todos los datos están en Supabase."
           fi
+
+  # ------------------------------------------------------------
+  # Publicación en GitHub Pages.
+  #
+  # Va en un job aparte porque el despliegue necesita permisos que
+  # el primero no debe tener: escribir en Pages y firmar la
+  # identidad de la ejecución. Manteniéndolos separados, el job que
+  # descarga XML de terceros sigue siendo de solo lectura.
+  # ------------------------------------------------------------
+  publicar:
+    name: Publicar la interfaz en GitHub Pages
+    needs: buscar-licitaciones
+    if: inputs.modo != 'diagnostico'
+    runs-on: ubuntu-latest
+
+    permissions:
+      pages: write
+      id-token: write
+
+    environment:
+      name: github-pages
+      url: ${{ steps.despliegue.outputs.page_url }}
+
+    steps:
+      - name: Desplegar
+        id: despliegue
+        uses: actions/deploy-pages@v4
+
+      - name: Enlace a la web
+        run: |
+          echo "### Interfaz publicada" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.despliegue.outputs.page_url }}" >> $GITHUB_STEP_SUMMARY
