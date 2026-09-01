@@ -1,0 +1,205 @@
+# ============================================================
+# STATE SCRAPER · Robot diario
+# ============================================================
+# Cada mañana GitHub enciende un ordenador en la nube, lee los
+# feeds, criba con el modelo, y publica la interfaz en GitHub
+# Pages.
+#
+# El repositorio NO recibe ningún commit automático, ni siquiera
+# de la web: Pages se despliega desde un artefacto, así que los
+# datos se sirven sin llegar a guardarse en ninguna rama. Aquí
+# solo vive código.
+
+name: Scraper de licitaciones (eventos y cultura)
+
+on:
+  # HORARIO. GitHub programa siempre en UTC, no en hora española.
+  #   '0 6 * * *' = 08:00 en horario de verano peninsular (CEST)
+  #                 07:00 en horario de invierno (CET)
+  # Si quieres clavar las 08:00 en invierno, cambia el 6 por un 7
+  # el último domingo de octubre.
+  schedule:
+    - cron: '0 6 * * *'
+
+  # Botón manual: pestaña Actions > este workflow > "Run workflow".
+  # Al pulsarlo aparecen dos opciones para hacer pruebas sin tocar código.
+  workflow_dispatch:
+    inputs:
+      modo:
+        description: 'Modo: normal escribe en Supabase, diagnostico no toca nada'
+        required: true
+        default: 'normal'
+        type: choice
+        options:
+          - normal
+          - diagnostico
+          - solo_cribado
+          - cribado_prueba
+      cpv_prefijos:
+        description: 'Prefijos CPV solo para esta ejecución (vacío = los de siempre)'
+        required: false
+        default: ''
+        type: string
+
+# Solo lectura del repositorio. Al no haber commits automáticos,
+# el robot no necesita permiso de escritura sobre el código.
+permissions:
+  contents: read
+
+# Evita que dos ejecuciones escriban en Supabase a la vez.
+concurrency:
+  group: scraper-licitaciones
+  cancel-in-progress: false
+
+jobs:
+  buscar-licitaciones:
+    name: Leer feeds y registrar novedades en Supabase
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      TZ: Europe/Madrid
+      # Inyección de los secrets. GitHub los sustituye en tiempo de
+      # ejecución y los enmascara automáticamente en los registros.
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      # Paso 4a. La clave nunca aparece en el código ni en los registros.
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      # Modelo del cribado. Cambiarlo es editar esta línea.
+      MODELO_CRIBADO: 'gpt-4o-mini'
+      # Tope de llamadas por ejecución: freno de gasto, no de calidad.
+      MAX_CRIBADO_POR_EJECUCION: '300'
+      # Filtro geográfico del canal agregado. Ponlo a 'false' si algún
+      # día quieres cubrir todas las comunidades autónomas.
+      SOLO_CATALUNYA_AGREGADO: 'true'
+      # EL SECTOR SE DEFINE AQUÍ, no en el código. Prefijos CPV separados
+      # por comas. Nicho actual: cultura y eventos.
+      #   Para afinar a espectáculo en vivo: '92312,9234,79953,79952100'
+      #   Para cambiar de sector entero, sustituye la lista completa.
+      # Si borras esta línea, el script usa sus valores de serie.
+      # Si en el botón manual escribes prefijos, mandan esos; si no, estos.
+      CPV_PREFIJOS: ${{ inputs.cpv_prefijos || '7995,923,925' }}
+      # La ventana es ADAPTATIVA: el script retrocede solo hasta donde
+      # llega lo que ya tiene guardado. Estos valores son los límites.
+      #   Tope de retroceso tras una caída larga o en la primera vez.
+      DIAS_ANTIGUEDAD_MAX: '14'
+      #   Solape sobre lo ya guardado, por si el feed llega desordenado.
+      DIAS_MARGEN_SOLAPE: '2'
+      #   Freno de emergencia. Si salta el aviso en el registro, NO subas
+      #   este número sin mirar antes por qué: suele indicar otro problema.
+      MAX_PAGINAS_POR_FEED: '25'
+      #   Proporción de una página que debe estar fuera de ventana para dejar
+      #   de paginar. PARÁMETRO A CALIBRAR: si un feed sigue agotando páginas,
+      #   bájalo a 0.8. Cuanto más bajo, antes corta y más rezagados se pierde.
+      UMBRAL_CORTE_PAGINA: '0.9'
+
+    steps:
+      - name: Descargar el código del repositorio
+        uses: actions/checkout@v4
+
+      - name: Preparar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Verificar que los secrets están configurados
+        run: |
+          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_KEY" ]; then
+            echo "::error::Faltan los secrets SUPABASE_URL o SUPABASE_KEY."
+            echo "::error::Créalos en Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+          echo "Credenciales presentes."
+
+      - name: Ejecutar el scraper
+        id: scraper
+        if: inputs.modo != 'solo_cribado' && inputs.modo != 'cribado_prueba'
+        run: python lector_atom.py ${{ inputs.modo == 'diagnostico' && '--diagnostico' || '' }}
+
+      - name: Cribado semántico (paso 4a)
+        id: cribado
+        # No se ejecuta en diagnóstico: ese modo no toca nada ni gasta saldo.
+        if: inputs.modo != 'diagnostico'
+        run: |
+          python cribador.py ${{ inputs.modo == 'cribado_prueba' && '--muestra 20' || '' }}
+
+      - name: Generar la interfaz
+        # No se ejecuta en diagnóstico: ese modo no toca ni lee resultados.
+        if: inputs.modo != 'diagnostico'
+        run: python generar_interfaz.py
+
+      - name: Preparar el sitio para publicar
+        if: inputs.modo != 'diagnostico'
+        run: |
+          mkdir -p sitio
+          cp interfaz.html sitio/index.html
+          # Sin este fichero, GitHub procesa el sitio con Jekyll y puede
+          # alterar el HTML. Le decimos que lo sirva tal cual.
+          touch sitio/.nojekyll
+
+      - name: Subir el sitio como artefacto de Pages
+        if: inputs.modo != 'diagnostico'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: sitio
+
+      - name: Guardar también una copia descargable
+        if: inputs.modo != 'diagnostico'
+        uses: actions/upload-artifact@v4
+        with:
+          name: interfaz-${{ github.run_number }}
+          path: interfaz.html
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Comprobar que el repositorio sigue limpio
+        run: |
+          # interfaz.html es un artefacto de salida, no código: se genera
+          # en cada ejecución y se descarga aparte. No debe subirse nunca.
+          rm -rf interfaz.html sitio
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::warning::El scraper ha dejado ficheros sin rastrear:"
+            git status --porcelain
+            echo "::warning::El diseño exige que no escriba nada en disco."
+          else
+            echo "Repositorio inmaculado. Todos los datos están en Supabase."
+          fi
+
+  # ------------------------------------------------------------
+  # Publicación en GitHub Pages.
+  #
+  # Va en un job aparte porque el despliegue necesita permisos que
+  # el primero no debe tener: escribir en Pages y firmar la
+  # identidad de la ejecución. Manteniéndolos separados, el job que
+  # descarga XML de terceros sigue siendo de solo lectura.
+  # ------------------------------------------------------------
+  publicar:
+    name: Publicar la interfaz en GitHub Pages
+    needs: buscar-licitaciones
+    if: inputs.modo != 'diagnostico'
+    runs-on: ubuntu-latest
+
+    permissions:
+      pages: write
+      id-token: write
+
+    environment:
+      name: github-pages
+      url: ${{ steps.despliegue.outputs.page_url }}
+
+    steps:
+      - name: Desplegar
+        id: despliegue
+        uses: actions/deploy-pages@v4
+
+      - name: Enlace a la web
+        run: |
+          echo "### Interfaz publicada" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.despliegue.outputs.page_url }}" >> $GITHUB_STEP_SUMMARY
