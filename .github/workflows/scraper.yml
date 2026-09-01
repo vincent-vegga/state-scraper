@@ -125,8 +125,25 @@ jobs:
         run: |
           python cribador.py ${{ inputs.modo == 'cribado_prueba' && '--muestra 20' || '' }}
 
+      - name: Generar la interfaz
+        # No se ejecuta en diagnóstico: ese modo no toca ni lee resultados.
+        if: inputs.modo != 'diagnostico'
+        run: python generar_interfaz.py
+
+      - name: Publicar la interfaz como artefacto descargable
+        if: inputs.modo != 'diagnostico'
+        uses: actions/upload-artifact@v4
+        with:
+          name: interfaz-${{ github.run_number }}
+          path: interfaz.html
+          if-no-files-found: warn
+          retention-days: 30
+
       - name: Comprobar que el repositorio sigue limpio
         run: |
+          # interfaz.html es un artefacto de salida, no código: se genera
+          # en cada ejecución y se descarga aparte. No debe subirse nunca.
+          rm -f interfaz.html
           if [ -n "$(git status --porcelain)" ]; then
             echo "::warning::El scraper ha dejado ficheros sin rastrear:"
             git status --porcelain
