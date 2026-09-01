@@ -13,6 +13,9 @@ no código: cambiar de dominio es editar una línea.
 > Proyecto desarrollado en el marco de un programa de fellowship, con un mes
 > de plazo para llegar a MVP funcional.
 
+**La interfaz está publicada y se actualiza sola cada mañana:**
+https://vincent-vegga.github.io/state-scraper/
+
 ---
 
 ## Estado del proyecto
@@ -25,6 +28,7 @@ El sistema está concebido como un pipeline de cinco pasos:
 | 2 | Filtrado por CPV y control de estado | ✅ Operativo |
 | 2b | Filtro por estado del expediente (solo `PUB`) | ✅ Operativo |
 | 4a | Cribado semántico con LLM | ✅ Operativo |
+| — | Interfaz web pública, actualizada a diario | ✅ Operativo |
 | 5 | Alerta al usuario | ⬜ Siguiente |
 | 3 | Descarga de documentos, si la solvencia remite al pliego | ⬜ Mejora |
 | 4b | Extracción de requisitos del PDF | ⬜ Mejora |
@@ -63,8 +67,9 @@ Todo lo marcado como operativo se ejecuta solo cada mañana.
       Supabase (PostgreSQL)
       tabla `licitaciones`
             │
-            ▼
-      Pasos 3, 4 y 5  (pendientes)
+            ├──▶ cribador.py ──▶ veredicto de viabilidad
+            │
+            └──▶ generar_interfaz.py ──▶ GitHub Pages
 ```
 
 Dos principios de diseño gobiernan el conjunto:
@@ -90,6 +95,8 @@ esperado, en lugar de degradarse discretamente.
 | `.github/workflows/scraper.yml` | Programación y configuración del robot |
 | `DECISIONES.md` | Registro de decisiones de arquitectura y su motivo |
 | `cribador.py` | Paso 4a: cribado semántico con LLM |
+| `generar_interfaz.py` | Construye la web a partir de la base de datos |
+| `.gitignore` | Impide que los datos generados acaben en el repositorio |
 | `esquema.sql` | Esquema completo de la base de datos, reproducible |
 
 ---
@@ -239,6 +246,31 @@ por provincia como funcionalidad de producto.
 
 ---
 
+## La interfaz
+
+`generar_interfaz.py` lee la vista `oportunidades` y escribe un **único
+fichero HTML con los datos incrustados dentro**. Sin servidor, sin
+credenciales en el navegador y sin depender de la red al abrirlo.
+
+Se publica en GitHub Pages **desde un artefacto de la ejecución**, no desde
+una rama. Es la diferencia que permite que el repositorio siga sin contener
+datos: el HTML se sirve sin llegar a guardarse en ningún commit.
+
+El despliegue va en un job aparte del workflow, con permisos propios de
+escritura sobre Pages. Así el job que descarga XML de terceros conserva
+únicamente permisos de lectura.
+
+La provincia se calcula al vuelo desde los dos primeros dígitos del código
+postal. Es un cálculo, no un dato: guardarlo sería duplicar información que
+ya está en la tabla.
+
+**El repositorio es público.** Los datos son de contratación pública y ya
+estaban publicados; las credenciales viven en los *secrets* de GitHub, que
+siguen siendo privados. Hacerlo público es además requisito de GitHub Pages
+en el plan gratuito.
+
+---
+
 ## El embudo
 
 Medido sobre datos reales de agosto de 2026:
@@ -281,6 +313,12 @@ relevante**. Eso es una alerta útil, no una lista.
   archivos. El cribado lo rechaza bien, pero desperdicia llamadas.
 - **Algunos títulos catalanes son el encabezado del pliego**, no una
   descripción. El cribado clasifica esos casos con muy poca señal.
+- **Las licitaciones detectadas antes del 24 de agosto no tienen plazo
+  guardado**, porque el campo aún no se extraía. Solo se rellena si el
+  expediente reaparece en el feed. Se resuelve solo según vencen.
+- **La fecha real de publicación llega en el 26,8 % de los casos.** El feed
+  transporta `IssueDate` de forma irregular; obtenerla siempre exigiría
+  descargar el documento del expediente.
 
 ---
 

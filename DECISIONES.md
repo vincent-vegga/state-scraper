@@ -476,6 +476,82 @@ que el resumen tranquilizador.
 
 ---
 
+## 24. La interfaz lleva los datos dentro, no los consulta
+
+**Contexto.** La demostración necesita una web que enseñe las
+oportunidades filtradas.
+
+**Alternativa descartada.** Una página que consultara Supabase desde el
+navegador. Habría exigido exponer una clave en un fichero público, abrir
+permisos de lectura sobre la base de datos y depender de la red en cada
+carga.
+
+**Decisión.** `generar_interfaz.py` produce un HTML único con los datos
+incrustados. Sin servidor, sin credenciales en el cliente, sin conexión.
+
+**Motivo adicional, específico del encargo.** La demostración se graba en
+vídeo. Con los datos dentro no hay esperas de carga ni fallos de red a
+mitad de toma.
+
+**Consecuencia.** La web enseña la foto de la última ejecución, no el
+estado en vivo. Para un producto con usuarios haría falta lo contrario;
+para un MVP que se actualiza cada mañana, la diferencia es irrelevante.
+
+**Detalle de diseño.** La provincia se calcula desde los dos primeros
+dígitos del código postal en el momento de generar. Es un cálculo, no un
+dato: guardarlo en la tabla sería duplicar información existente.
+
+---
+
+## 25. Publicar en Pages desde artefacto, no desde rama
+
+**Contexto.** Publicar en GitHub Pages parecía obligar a incumplir la
+Decisión 5 —"el repositorio contiene código y nada más"—, porque lo
+habitual es servir el sitio desde una rama `gh-pages` con el HTML dentro.
+
+**Decisión.** Usar el despliegue oficial **desde artefacto**. El HTML se
+sube como artefacto de la ejecución y Pages lo sirve directamente.
+
+**Consecuencia.** Los datos no se guardan en **ninguna** rama, ni siquiera
+en una de publicación. La Decisión 5 se mantiene intacta en lugar de
+matizarse. La primera propuesta del arquitecto —rama `gh-pages`— era
+peor y se descartó al comprobar que existía el mecanismo oficial.
+
+**Separación de permisos.** El despliegue va en un job aparte, con permisos
+de escritura sobre Pages. El job que descarga XML de terceros y ejecuta
+código sobre él conserva solo permisos de lectura. Es la misma lógica que
+llevó a quitar el permiso de escritura del repositorio en la Decisión 5.
+
+**El repositorio pasa a ser público.** Pages en el plan gratuito lo exige.
+Se verificó antes de hacerlo que el historial de commits no contuviera
+credenciales; las claves viven en los *secrets*, que siguen siendo
+privados. Los datos publicados son de contratación pública y ya estaban
+abiertos.
+
+---
+
+## 26. El dato real en lugar de la promesa
+
+**Contexto.** La entradilla de la web decía "filtrados automáticamente
+entre miles de anuncios".
+
+**Objeción del Director de Proyecto.** Eso es una afirmación. Mejor un
+número comprobable.
+
+**Decisión.** La interfaz consulta cuántos anuncios se han leído y cuántos
+se han valorado, y lo enseña: *"De N anuncios leídos, M se han valorado uno
+a uno"*.
+
+**Por qué importa más de lo que parece.** El embudo es el argumento
+central del producto: 926 capturadas, 124 vivas, 44 relevantes. Enseñar la
+cifra convierte la promesa de marketing en la demostración del trabajo.
+
+**Léxico.** "Encaje" se sustituyó por "viabilidad", y las etiquetas del
+filtro pasaron a estar escritas desde el punto de vista del usuario —"Para
+mí", "Puede ser para mí"— en lugar del sistema.
+
+---
+
 ## Deuda técnica anotada
 
 Cosas conocidas que se decidió no hacer, y por qué.
@@ -490,3 +566,5 @@ Cosas conocidas que se decidió no hacer, y por qué.
 | Estrechar el prefijo CPV `925` a museos y patrimonio | Arrastra destrucción documental: ~15 % de llamadas desperdiciadas |
 | Recortar el encabezado del pliego en títulos catalanes | Algunos títulos son la boilerplate del PCAP, sin señal para el cribado |
 | Refrescar el estado de las filas antiguas | Solo se refresca lo que reaparece en la ventana adaptativa |
+| Plazo ausente en lo detectado antes del 24 de agosto | Se resuelve solo según vencen esos expedientes |
+| Fecha real de publicación al 26,8 % | Exigiría descargar el CallForTenders de cada expediente |
