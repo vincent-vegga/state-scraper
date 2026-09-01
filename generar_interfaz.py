@@ -108,6 +108,36 @@ def dias_hasta(fecha_iso: str | None) -> int | None:
     return (limite - datetime.now(timezone.utc)).days
 
 
+def contar(cliente, filtro=None) -> int | None:
+    """
+    Cuenta filas sin traérselas. Devuelve None si la consulta falla: un
+    dato de cabecera no puede tumbar la generación de la interfaz.
+    """
+    try:
+        consulta = cliente.table("licitaciones").select("id_licitacion", count="exact")
+        if filtro:
+            consulta = filtro(consulta)
+        return consulta.limit(1).execute().count
+    except Exception as error:
+        logging.warning("No se pudo contar (%s): %s", filtro, error)
+        return None
+
+
+def estadisticas(cliente) -> dict[str, int | None]:
+    """
+    El embudo real, para poder enseñarlo en lugar de afirmarlo.
+
+    "Filtrados automáticamente entre miles de anuncios" es una promesa.
+    "Ha leído 926 y valorado 124" es un hecho comprobable.
+    """
+    return {
+        "leidos": contar(cliente),
+        "valorados": contar(
+            cliente, lambda c: c.not_.is_("cribado_veredicto", "null")
+        ),
+    }
+
+
 def preparar(filas: list[dict]) -> list[dict]:
     """
     Convierte las filas de Supabase en lo que necesita la interfaz.
@@ -160,146 +190,133 @@ PLANTILLA = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Bolos públicos · oportunidades abiertas</title>
+<title>Contratos públicos para el espectáculo en vivo</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700;800&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>
+/* Sin color decorativo: la jerarquía la llevan el peso y las líneas.
+   El color solo aparece donde significa algo — plazo que aprieta,
+   viabilidad alta. */
 :root{
-  --noche:#141B2E;      /* la hora del concierto */
-  --escenario:#1D2740;  /* superficie elevada */
-  --foco:#F2B441;       /* luz de escenario */
-  --papel:#EDE9E1;
-  --tenue:#8791A8;
-  --urgente:#E4695C;
-  --vivo:#77C48F;
-  --borde:rgba(237,233,225,.14);
+  --fondo:#17171A;
+  --superficie:#1F1F23;
+  --texto:#E9E8E5;
+  --tenue:#8B8B92;
+  --linea:rgba(233,232,229,.11);
+  --linea-fuerte:rgba(233,232,229,.28);
+  --urge:#D98A72;
+  --viable:#8FB89A;
 }
 *{box-sizing:border-box}
-html{scroll-behavior:smooth}
 body{
-  margin:0;background:var(--noche);color:var(--papel);
+  margin:0;background:var(--fondo);color:var(--texto);
   font-family:'IBM Plex Sans',system-ui,sans-serif;
-  font-size:16px;line-height:1.55;
+  font-size:16px;line-height:1.6;font-weight:400;
   -webkit-font-smoothing:antialiased;
 }
-.envoltorio{max-width:1080px;margin:0 auto;padding:0 24px 96px}
+.envoltorio{max-width:1000px;margin:0 auto;padding:0 28px 96px}
 
 /* ---------- Cabecera ---------- */
-header{padding:72px 0 40px;border-bottom:1px solid var(--borde)}
+header{padding:80px 0 44px}
 h1{
-  font-family:'Archivo',sans-serif;font-weight:800;
-  font-size:clamp(2.6rem,7vw,4.6rem);line-height:.95;
-  letter-spacing:-.03em;margin:0 0 18px;
+  font-weight:600;font-size:clamp(1.9rem,4.2vw,2.9rem);
+  line-height:1.2;letter-spacing:-.02em;margin:0 0 20px;max-width:20ch;
 }
-h1 em{font-style:normal;color:var(--foco)}
-.entradilla{max-width:60ch;color:var(--tenue);margin:0;font-size:1.05rem}
+.entradilla{max-width:62ch;color:var(--tenue);margin:0;font-size:1rem;line-height:1.65}
 .marcador{
-  display:flex;gap:40px;flex-wrap:wrap;margin-top:34px;
-  font-family:'Archivo',sans-serif;
+  display:grid;grid-template-columns:repeat(4,1fr);gap:1px;
+  margin-top:46px;background:var(--linea);
+  border-top:1px solid var(--linea);border-bottom:1px solid var(--linea);
 }
-.marcador div span{display:block;font-size:2.1rem;font-weight:700;line-height:1}
-.marcador div small{
-  display:block;margin-top:4px;color:var(--tenue);
-  font-family:'IBM Plex Sans',sans-serif;font-size:.85rem;
+.marcador div{background:var(--fondo);padding:20px 20px 20px 0}
+.marcador span{
+  display:block;font-size:1.75rem;font-weight:600;line-height:1.1;
+  letter-spacing:-.02em;font-variant-numeric:tabular-nums;
 }
+.marcador small{display:block;margin-top:6px;color:var(--tenue);font-size:.82rem}
 
 /* ---------- Filtros ---------- */
 .filtros{
-  display:flex;gap:14px;flex-wrap:wrap;align-items:center;
-  padding:22px 0;position:sticky;top:0;background:var(--noche);
-  border-bottom:1px solid var(--borde);z-index:10;
+  display:flex;gap:12px;flex-wrap:wrap;align-items:center;
+  padding:20px 0;position:sticky;top:0;background:var(--fondo);
+  border-bottom:1px solid var(--linea);z-index:10;
 }
 select,input[type=search]{
-  font:inherit;font-size:.95rem;color:var(--papel);
-  background:var(--escenario);border:1px solid var(--borde);
-  border-radius:2px;padding:9px 12px;min-width:190px;
+  font:inherit;font-size:.94rem;color:var(--texto);
+  background:var(--superficie);border:1px solid var(--linea);
+  border-radius:3px;padding:9px 12px;min-width:200px;
 }
 input[type=search]{flex:1;min-width:240px}
 select:focus-visible,input:focus-visible,.fila:focus-visible{
-  outline:2px solid var(--foco);outline-offset:2px;
+  outline:2px solid var(--linea-fuerte);outline-offset:2px;
 }
-.recuento{color:var(--tenue);font-size:.9rem;margin-left:auto}
+.recuento{color:var(--tenue);font-size:.88rem;margin-left:auto}
 
 /* ---------- Lista ---------- */
 .fila{
-  display:grid;grid-template-columns:92px 1fr auto;gap:24px;
-  align-items:start;padding:22px 0;border-bottom:1px solid var(--borde);
+  display:grid;grid-template-columns:76px 1fr auto;gap:26px;
+  align-items:start;padding:24px 0;border-bottom:1px solid var(--linea);
   cursor:pointer;width:100%;text-align:left;background:none;
   border-left:0;border-right:0;border-top:0;color:inherit;font:inherit;
 }
-.fila:hover .titulo{color:var(--foco)}
+.fila:hover .titulo{text-decoration:underline;text-underline-offset:3px}
 
-/* El bloque de fecha: la firma visual, como una fecha de gira */
 .fecha{
-  font-family:'Archivo',sans-serif;text-align:center;
-  border-top:3px solid var(--foco);padding-top:8px;
+  text-align:left;padding-top:2px;
+  border-top:1px solid var(--linea-fuerte);
 }
-.fecha .dia{font-size:2rem;font-weight:800;line-height:.9;display:block}
-.fecha .mes{font-size:.8rem;color:var(--tenue);display:block;margin-top:3px}
-.fecha .cuenta{
-  display:block;margin-top:7px;font-size:.78rem;
-  font-family:'IBM Plex Sans',sans-serif;color:var(--tenue);
+.fecha .dia{
+  display:block;font-size:1.45rem;font-weight:600;line-height:1.15;
+  padding-top:8px;font-variant-numeric:tabular-nums;
 }
-.fecha.apura{border-top-color:var(--urgente)}
-.fecha.apura .cuenta{color:var(--urgente)}
-.fecha.sinplazo{border-top-color:var(--tenue)}
-.fecha.sinplazo .dia{font-size:1rem;font-weight:500;padding-top:9px}
+.fecha .cuenta{display:block;margin-top:2px;font-size:.78rem;color:var(--tenue)}
+.fecha.apura{border-top-color:var(--urge)}
+.fecha.apura .cuenta{color:var(--urge)}
+.fecha.sinplazo .dia{font-size:.9rem;font-weight:400;color:var(--tenue)}
 
-.titulo{font-weight:600;margin:0 0 5px;font-size:1.02rem;line-height:1.35}
-.meta{color:var(--tenue);font-size:.9rem;margin:0}
+.titulo{font-weight:500;margin:0 0 5px;font-size:1rem;line-height:1.45;max-width:62ch}
+.meta{color:var(--tenue);font-size:.88rem;margin:0}
 .derecha{text-align:right;white-space:nowrap}
-.importe{font-family:'Archivo',sans-serif;font-weight:700;font-size:1.05rem}
-.sello{
-  display:inline-block;margin-top:6px;font-size:.72rem;
-  padding:2px 8px;border-radius:2px;border:1px solid var(--borde);
-  color:var(--tenue);
-}
-.sello.si{color:var(--vivo);border-color:rgba(119,196,143,.45)}
+.importe{font-weight:600;font-size:1rem;font-variant-numeric:tabular-nums}
+.sello{display:block;margin-top:5px;font-size:.78rem;color:var(--tenue)}
+.sello.si{color:var(--viable)}
 
 /* ---------- Detalle ---------- */
-.detalle{
-  display:none;padding:6px 0 30px 116px;
-  border-bottom:1px solid var(--borde);
-}
+.detalle{display:none;padding:2px 0 32px 102px;border-bottom:1px solid var(--linea)}
 .detalle.abierto{display:block}
-.detalle dl{
-  display:grid;grid-template-columns:150px 1fr;gap:10px 22px;margin:0 0 22px;
-}
+.detalle dl{display:grid;grid-template-columns:150px 1fr;gap:11px 24px;margin:0 0 24px}
 .detalle dt{color:var(--tenue);font-size:.88rem}
-.detalle dd{margin:0;font-size:.95rem}
-.detalle a{color:var(--foco)}
+.detalle dd{margin:0;font-size:.94rem}
 .cita{
-  border-left:2px solid var(--foco);padding-left:16px;
-  margin:0 0 22px;color:var(--papel);max-width:66ch;
+  border-left:1px solid var(--linea-fuerte);padding-left:18px;
+  margin:0 0 24px;max-width:66ch;color:var(--texto);
 }
 .boton{
-  display:inline-block;background:var(--foco);color:var(--noche);
-  padding:10px 18px;border-radius:2px;font-weight:600;
+  display:inline-block;border:1px solid var(--linea-fuerte);color:var(--texto);
+  padding:9px 18px;border-radius:3px;font-weight:500;
   text-decoration:none;font-size:.92rem;
 }
+.boton:hover{background:var(--superficie)}
 
-.vacio{padding:70px 0;text-align:center;color:var(--tenue)}
-footer{padding-top:34px;color:var(--tenue);font-size:.85rem}
+.vacio{padding:72px 0;text-align:center;color:var(--tenue)}
+footer{padding-top:36px;color:var(--tenue);font-size:.84rem;max-width:70ch}
 
 @media(max-width:720px){
-  .fila{grid-template-columns:72px 1fr;gap:16px}
+  .fila{grid-template-columns:66px 1fr;gap:18px}
   .derecha{grid-column:2;text-align:left}
   .detalle{padding-left:0}
   .detalle dl{grid-template-columns:1fr}
-  .marcador{gap:26px}
+  .marcador{grid-template-columns:repeat(2,1fr)}
 }
-@media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
 </style>
 </head>
 <body>
 <div class="envoltorio">
 
 <header>
-  <h1>Hay <em id="titular">—</em><br>bolos públicos abiertos</h1>
-  <p class="entradilla">Contratos de las administraciones españolas para música,
-  artes escénicas, producción y servicios técnicos de espectáculo. Filtrados
-  automáticamente cada mañana entre miles de anuncios.</p>
+  <h1 id="titular">—</h1>
+  <p class="entradilla" id="entradilla">—</p>
   <div class="marcador">
     <div><span id="m-total">—</span><small>oportunidades</small></div>
     <div><span id="m-prov">—</span><small>provincias</small></div>
@@ -310,10 +327,10 @@ footer{padding-top:34px;color:var(--tenue);font-size:.85rem}
 
 <div class="filtros">
   <select id="f-provincia" aria-label="Filtrar por provincia"></select>
-  <select id="f-veredicto" aria-label="Filtrar por encaje">
-    <option value="">Todo el encaje</option>
-    <option value="si">Encaje claro</option>
-    <option value="quizas">Encaje posible</option>
+  <select id="f-veredicto" aria-label="Filtrar por viabilidad">
+    <option value="">Cualquier viabilidad</option>
+    <option value="si">Para mí</option>
+    <option value="quizas">Puede ser para mí</option>
   </select>
   <input type="search" id="f-texto" placeholder="Buscar por título u órgano">
   <span class="recuento" id="recuento"></span>
@@ -326,27 +343,28 @@ footer{padding-top:34px;color:var(--tenue);font-size:.85rem}
 
 <script id="datos" type="application/json">__DATOS__</script>
 <script>
-const DATOS = JSON.parse(document.getElementById('datos').textContent);
+const PAQUETE = JSON.parse(document.getElementById('datos').textContent);
+const DATOS = PAQUETE.oportunidades;
+const STATS = PAQUETE.stats || {};
 const MESES = ['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic'];
 
+const num = n => new Intl.NumberFormat('es-ES').format(n);
 const euros = n => n == null ? 'sin importe'
   : new Intl.NumberFormat('es-ES',{style:'currency',currency:'EUR',maximumFractionDigits:0}).format(n);
 const fechaLarga = s => s ? new Date(s).toLocaleDateString('es-ES',
   {day:'numeric',month:'long',year:'numeric'}) : '—';
 
 function bloqueFecha(o){
-  if(o.dias == null) return `<div class="fecha sinplazo"><span class="dia">Sin<br>plazo</span></div>`;
+  if(o.dias == null) return `<div class="fecha sinplazo"><span class="dia">Sin plazo publicado</span></div>`;
   const d = new Date(o.limite);
-  const cuenta = o.dias < 0 ? 'vencido' : o.dias === 0 ? 'hoy' :
+  const cuenta = o.dias < 0 ? 'vencido' : o.dias === 0 ? 'vence hoy' :
                  o.dias === 1 ? 'queda 1 día' : `quedan ${o.dias} días`;
   return `<div class="fecha ${o.dias <= 7 ? 'apura' : ''}">
-    <span class="dia">${d.getDate()}</span>
-    <span class="mes">${MESES[d.getMonth()]}</span>
+    <span class="dia">${d.getDate()} ${MESES[d.getMonth()]}</span>
     <span class="cuenta">${cuenta}</span></div>`;
 }
 
 function detalle(o, i){
-  const cpv = o.cpvs.length ? o.cpvs.join(', ') : '—';
   return `<section class="detalle" id="d${i}">
     ${o.motivo ? `<p class="cita">${o.motivo}</p>` : ''}
     <dl>
@@ -355,7 +373,7 @@ function detalle(o, i){
       <dt>Presupuesto</dt><dd>${euros(o.presupuesto)}</dd>
       <dt>Plazo</dt><dd>${fechaLarga(o.limite)}</dd>
       <dt>Publicado</dt><dd>${fechaLarga(o.publicacion)}</dd>
-      <dt>Códigos CPV</dt><dd>${cpv}</dd>
+      <dt>Códigos CPV</dt><dd>${o.cpvs.length ? o.cpvs.join(', ') : '—'}</dd>
     </dl>
     ${o.enlace ? `<a class="boton" href="${o.enlace}" target="_blank" rel="noopener">Ver el expediente</a>` : ''}
   </section>`;
@@ -383,23 +401,32 @@ function pintar(){
       </div>
       <div class="derecha">
         <div class="importe">${euros(o.presupuesto)}</div>
-        <span class="sello ${o.veredicto}">${o.veredicto === 'si' ? 'encaje claro' : 'encaje posible'}</span>
+        <span class="sello ${o.veredicto}">${o.veredicto === 'si' ? 'para mí' : 'puede ser para mí'}</span>
       </div>
     </button>${detalle(o,i)}`).join('')
     : `<p class="vacio">Ningún contrato encaja con estos filtros.<br>
-       Prueba a quitar la provincia o a ampliar el encaje.</p>`;
+       Prueba a quitar la provincia o a ampliar la viabilidad.</p>`;
 
   document.querySelectorAll('.fila').forEach(f => f.onclick = () => {
     const d = document.getElementById('d' + f.dataset.i);
-    const abierto = d.classList.toggle('abierto');
-    f.setAttribute('aria-expanded', abierto);
+    f.setAttribute('aria-expanded', d.classList.toggle('abierto'));
   });
 }
 
-// Marcador de cabecera
-const provincias = [...new Set(DATOS.map(o => o.provincia).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'es'));
+const provincias = [...new Set(DATOS.map(o => o.provincia).filter(Boolean))]
+  .sort((a,b) => a.localeCompare(b,'es'));
 const total = DATOS.reduce((s,o) => s + (o.presupuesto || 0), 0);
-document.getElementById('titular').textContent = DATOS.length;
+
+document.getElementById('titular').textContent =
+  `Hay ${DATOS.length} ${DATOS.length === 1 ? 'contrato nuevo' : 'contratos nuevos'} que podrían interesarte`;
+
+// El dato real sustituye a la promesa: no "filtrados entre miles", sino
+// cuántos se han leído y cuántos se han valorado para llegar hasta aquí.
+const sector = 'Contratos de las administraciones españolas para música, artes escénicas, producción y servicios técnicos de espectáculo.';
+document.getElementById('entradilla').textContent = STATS.leidos
+  ? `${sector} De ${num(STATS.leidos)} anuncios leídos, ${num(STATS.valorados || 0)} se han valorado uno a uno.`
+  : sector;
+
 document.getElementById('m-total').textContent = DATOS.length;
 document.getElementById('m-prov').textContent = provincias.length;
 document.getElementById('m-importe').textContent =
@@ -407,15 +434,14 @@ document.getElementById('m-importe').textContent =
 document.getElementById('m-urge').textContent =
   DATOS.filter(o => o.dias != null && o.dias >= 0 && o.dias <= 7).length;
 
-const sel = document.getElementById('f-provincia');
-sel.innerHTML = '<option value="">Toda España</option>' +
-  provincias.map(p => `<option>${p}</option>`).join('');
+document.getElementById('f-provincia').innerHTML =
+  '<option value="">Toda España</option>' + provincias.map(p => `<option>${p}</option>`).join('');
 
 ['f-provincia','f-veredicto','f-texto'].forEach(id =>
   document.getElementById(id).addEventListener('input', pintar));
 
 document.getElementById('pie').textContent =
-  'Datos de la Plataforma de Contratación del Sector Público y plataformas autonómicas agregadas. Actualizado el __ACTUALIZADO__.';
+  'Datos de la Plataforma de Contratación del Sector Público y de las plataformas autonómicas agregadas. Actualizado el __ACTUALIZADO__.';
 
 pintar();
 </script>
@@ -424,10 +450,12 @@ pintar();
 """
 
 
-def escribir(oportunidades: list[dict], ruta: str) -> None:
+def escribir(oportunidades: list[dict], ruta: str,
+             stats: dict | None = None) -> None:
     """Inyecta los datos en la plantilla y escribe el fichero."""
     # `</script>` dentro del JSON cerraría la etiqueta antes de tiempo.
-    datos = json.dumps(oportunidades, ensure_ascii=False).replace("</", "<\\/")
+    paquete = {"oportunidades": oportunidades, "stats": stats or {}}
+    datos = json.dumps(paquete, ensure_ascii=False).replace("</", "<\\/")
     ahora = datetime.now(timezone.utc).astimezone().strftime("%d/%m/%Y a las %H:%M")
 
     html = PLANTILLA.replace("__DATOS__", datos).replace("__ACTUALIZADO__", ahora)
@@ -462,7 +490,10 @@ def main() -> int:
                         "Se generará una interfaz vacía.", VISTA)
 
     oportunidades = preparar(filas)
-    escribir(oportunidades, opciones.salida)
+    stats = estadisticas(cliente)
+    escribir(oportunidades, opciones.salida, stats)
+    logging.info("  Embudo: %s leídos -> %s valorados -> %d relevantes",
+                 stats.get("leidos"), stats.get("valorados"), len(oportunidades))
 
     con_provincia = sum(1 for o in oportunidades if o["provincia"])
     con_plazo = sum(1 for o in oportunidades if o["dias"] is not None)
