@@ -1,0 +1,17 @@
+# ============================================================
+# STATE SCRAPER · Ficheros que nunca deben subirse
+# ============================================================
+# El repositorio guarda CÓDIGO. Los datos viven en Supabase y
+# los resultados se descargan como artefactos de la ejecución.
+
+# Interfaz generada: contiene datos, se regenera en cada pasada.
+interfaz.html
+
+# Credenciales locales, si algún día se trabaja fuera de Actions.
+.env
+
+# Restos de Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
