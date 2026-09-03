@@ -193,6 +193,9 @@ def preparar(filas: list[dict]) -> list[dict]:
 
         preparadas.append({
             "titulo": fila.get("titulo") or "(sin título)",
+            # Necesario para separar las novedades. Es la fecha en que el
+            # robot la vio por primera vez, no la de publicación.
+            "deteccion": fila.get("fecha_deteccion"),
             "organo": fila.get("organo") or "",
             "provincia": PROVINCIAS.get(cp[:2], "") if len(cp) >= 2 else "",
             "presupuesto": fila.get("presupuesto"),
@@ -272,6 +275,28 @@ h1{
    distingue si la lista se ha filtrado o si nunca cambió. */
 .marcador.cambiando span{opacity:.25}
 .marcador small{display:block;margin-top:6px;color:var(--tenue);font-size:.82rem}
+
+/* ---------- Pestañas ---------- */
+.pestanas{
+  display:flex;gap:26px;margin-top:44px;
+  border-bottom:1px solid var(--linea);
+}
+.pestana{
+  background:none;border:0;color:var(--tenue);font:inherit;font-size:.98rem;
+  font-weight:500;padding:0 0 13px;cursor:pointer;position:relative;
+  transition:color .15s;
+}
+.pestana:hover{color:var(--texto)}
+.pestana[aria-selected="true"]{color:var(--texto)}
+/* La línea inferior marca la activa. Es más sobrio que un fondo y no
+   añade otra caja a una página que ya tiene bastantes. */
+.pestana[aria-selected="true"]::after{
+  content:'';position:absolute;left:0;right:0;bottom:-1px;height:2px;
+  background:var(--texto);
+}
+.pestana .cuantas{
+  margin-left:7px;font-size:.82rem;color:var(--tenue);font-weight:400;
+}
 
 /* ---------- Filtros ---------- */
 .filtros{
@@ -459,6 +484,13 @@ footer{padding-top:36px;color:var(--tenue);font-size:.84rem;max-width:70ch}
   </div>
 </header>
 
+<div class="pestanas" role="tablist">
+  <button class="pestana" role="tab" id="p-hoy" aria-selected="false"
+          aria-controls="lista">Contratos de hoy<span class="cuantas" id="c-hoy"></span></button>
+  <button class="pestana" role="tab" id="p-todo" aria-selected="true"
+          aria-controls="lista">Todos los abiertos<span class="cuantas" id="c-todo"></span></button>
+</div>
+
 <div class="filtros">
   <select id="f-veredicto" aria-label="Filtrar por viabilidad">
     <option value="">Cualquier viabilidad</option>
@@ -528,9 +560,11 @@ function marcador(lista){
   const provincias = [...new Set(lista.map(o => o.provincia).filter(Boolean))];
   const total = lista.reduce((s,o) => s + (o.presupuesto || 0), 0);
 
-  document.getElementById('titular').textContent =
-    `Hay ${lista.length} ${lista.length === 1 ? 'contrato' : 'contratos'} ` +
-    `${lista.length === 1 ? 'nuevo' : 'nuevos'} que podrían interesarte`;
+  const n = lista.length;
+  document.getElementById('titular').textContent = pestana === 'hoy'
+    ? (n === 0 ? 'Hoy no hay contratos nuevos para ti'
+               : `Hoy hay ${n} ${n === 1 ? 'contrato nuevo' : 'contratos nuevos'} para ti`)
+    : `Hay ${n} ${n === 1 ? 'contrato abierto' : 'contratos abiertos'} que podrían interesarte`;
 
   document.getElementById('m-total').textContent = lista.length;
   document.getElementById('m-prov').textContent = provincias.length;
@@ -544,10 +578,27 @@ function marcador(lista){
 // "ninguna": es lo que espera quien todavía no ha elegido nada.
 const elegidas = new Set();
 
+// Se considera novedad lo detectado en la última pasada del robot, no lo
+// detectado "hoy" según el calendario. Si el robot se cae un día, al
+// volver detecta lo acumulado y todo eso entra como novedad: así no se
+// pierde ninguna, aunque el rótulo "hoy" abarque a veces más de un día.
+// Es una decisión deliberada: el usuario no tiene por qué saber cuándo
+// falló el sistema, solo qué hay nuevo para él.
+const ULTIMA_PASADA = DATOS.reduce((max,o) =>
+  o.deteccion && o.deteccion > max ? o.deteccion : max, '');
+const MARGEN_NOVEDAD = 6 * 60 * 60 * 1000;   // 6 h de holgura
+const esNovedad = o => o.deteccion &&
+  (new Date(ULTIMA_PASADA) - new Date(o.deteccion)) < MARGEN_NOVEDAD;
+
+let pestana = 'todo';
+
 function filtrar(){
   const ver = document.getElementById('f-veredicto').value;
   const txt = document.getElementById('f-texto').value.toLowerCase().trim();
+  // El filtro de la pestaña se aplica junto a los demás: al cambiar de
+  // pestaña se conservan la provincia y la viabilidad elegidas.
   return DATOS.filter(o =>
+    (pestana === 'todo' || esNovedad(o)) &&
     (elegidas.size === 0 || elegidas.has(o.provincia)) &&
     (!ver || o.veredicto === ver) &&
     (!txt || (o.titulo + ' ' + o.organo).toLowerCase().includes(txt)));
@@ -569,8 +620,12 @@ function pintar(){
         <span class="sello ${o.veredicto}">${o.veredicto === 'si' ? 'para mí' : 'puede ser para mí'}</span>
       </div>
     </button>${detalle(o,i)}`).join('')
-    : `<p class="vacio">Ningún contrato encaja con estos filtros.<br>
-       Prueba a quitar la provincia o a ampliar la viabilidad.</p>`;
+    : (pestana === 'hoy' && !elegidas.size && !document.getElementById('f-veredicto').value
+        && !document.getElementById('f-texto').value.trim()
+        ? `<p class="vacio">No hay novedades.<br>
+           Vuelve mañana: el robot revisa los anuncios cada madrugada.</p>`
+        : `<p class="vacio">Ningún contrato encaja con estos filtros.<br>
+           Prueba a quitar la provincia o a ampliar la viabilidad.</p>`);
 
   document.querySelectorAll('.fila').forEach(f => f.onclick = () => {
     const d = document.getElementById('d' + f.dataset.i);
@@ -782,6 +837,21 @@ document.addEventListener('click', ev => {
 });
 
 pintarEtiquetas();
+
+// Los contadores de las pestañas ignoran los filtros: dicen cuánto hay en
+// total en cada una, no cuánto queda tras filtrar. Si no, cambiar de
+// pestaña sería un salto a ciegas.
+document.getElementById('c-hoy').textContent = DATOS.filter(esNovedad).length;
+document.getElementById('c-todo').textContent = DATOS.length;
+
+function cambiarPestana(cual){
+  pestana = cual;
+  document.getElementById('p-hoy').setAttribute('aria-selected', cual === 'hoy');
+  document.getElementById('p-todo').setAttribute('aria-selected', cual === 'todo');
+  repintar();
+}
+document.getElementById('p-hoy').onclick = () => cambiarPestana('hoy');
+document.getElementById('p-todo').onclick = () => cambiarPestana('todo');
 
 ['f-veredicto','f-texto'].forEach(id =>
   document.getElementById(id).addEventListener('input', repintar));
