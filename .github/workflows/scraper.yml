@@ -175,13 +175,6 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
-      - name: Alerta diaria por correo (paso 5)
-        # En diagnóstico no se envía nada. En alerta_prueba se compone el
-        # correo y se imprime, pero no sale.
-        if: inputs.modo != 'diagnostico' && inputs.modo != 'cribado_prueba'
-        run: |
-          python alertador.py ${{ inputs.modo == 'alerta_prueba' && '--simulacro' || '' }}
-
       - name: Comprobar que el repositorio sigue limpio
         run: |
           # interfaz.html es un artefacto de salida, no código: se genera
@@ -194,6 +187,39 @@ jobs:
           else
             echo "Repositorio inmaculado. Todos los datos están en Supabase."
           fi
+
+  # ------------------------------------------------------------
+  # Alerta diaria por correo.
+  #
+  # Va en un job APARTE y no encadenado con la publicación: si el
+  # envío falla, la web debe publicarse igualmente. Estuvieron en
+  # el mismo job y un rechazo del proveedor de correo dejó el sitio
+  # sin actualizar durante horas, que es mucho peor que no recibir
+  # un aviso.
+  # ------------------------------------------------------------
+  alertar:
+    name: Alerta diaria por correo (paso 5)
+    needs: buscar-licitaciones
+    if: inputs.modo != 'diagnostico' && inputs.modo != 'cribado_prueba'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+      DESTINATARIOS_ALERTA: ${{ secrets.DESTINATARIOS_ALERTA }}
+      URL_INTERFAZ: 'https://vincent-vegga.github.io/state-scraper/'
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+      - run: pip install -r requirements.txt
+      - name: Enviar
+        run: python alertador.py ${{ inputs.modo == 'alerta_prueba' && '--simulacro' || '' }}
 
   # ------------------------------------------------------------
   # Publicación en GitHub Pages.
