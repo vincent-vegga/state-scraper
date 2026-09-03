@@ -8,8 +8,9 @@
 -- Es idempotente: se puede ejecutar sobre una base ya montada sin
 -- borrar ni alterar los datos existentes.
 --
--- Incorpora las migraciones de fechas, estado del expediente y cribado.
--- Última actualización: agosto de 2026 (pasos 1, 2 y 4a operativos)
+-- Incorpora todas las migraciones: fechas, estado del expediente,
+-- cribado, vigencia y novedades.
+-- Última actualización: septiembre de 2026 (pipeline completo)
 -- ============================================================
 
 
@@ -69,6 +70,11 @@ create table if not exists public.licitaciones (
     --   publicacion   -> `IssueDate` de CODICE. Cuánto lleva en la calle,
     --                    que mide la ventaja que lleva la competencia.
     --   limite        -> Plazo de presentación. Si aún se puede ofertar.
+    --
+    -- Las tres son `timestamptz`: guardan el instante, no la hora local.
+    -- El script asume hora peninsular cuando CODICE omite la zona, y la
+    -- interfaz muestra siempre en Europe/Madrid. Asumir UTC desplazaba un
+    -- vencimiento de las 23:59 al día siguiente.
     fecha_actualizacion timestamptz,
     fecha_publicacion   timestamptz,
     fecha_limite        timestamptz,
@@ -193,10 +199,26 @@ where estado_pipeline = 'pendiente_analisis'
 order by coalesce(fecha_limite, fecha_deteccion);
 
 
--- 4.3 · Lo que se le enseñaría al usuario final.
+-- 4.3 · Lo que se le enseña al usuario final. Alimenta la web y el correo.
 --
 -- Incluye 'quizas' deliberadamente: perder una oportunidad cuesta un
 -- cliente, mostrar una de más cuesta un vistazo.
+--
+-- REGLA DE VIGENCIA. Solo se muestra lo que se puede respaldar:
+--
+--   · Plazo publicado y no vencido       -> se muestra. El plazo es la
+--                                           prueba de que sigue viva.
+--   · Sin plazo, pero vista hace poco    -> se muestra. Haberla visto es
+--                                           la única evidencia que queda.
+--   · Sin plazo y sin verse en 14 días   -> se oculta. No saber si sigue
+--                                           abierta no es suponer que sí.
+--
+-- El estado guardado solo se actualiza cuando el expediente reaparece en
+-- el feed, y no todos reaparecen. Sin esta regla, la web mostraba como
+-- abiertas licitaciones ya adjudicadas.
+--
+-- No hay tarea de limpieza: la vista se recalcula en cada consulta y lo
+-- obsoleto desaparece solo según pasa el tiempo.
 drop view if exists public.oportunidades;
 
 create view public.oportunidades
@@ -204,12 +226,19 @@ with (security_invoker = true) as
 select id_licitacion, titulo, organo, origen, codigo_postal,
        presupuesto, cpvs, enlace,
        fecha_limite, fecha_publicacion,
+       -- La necesitan la pestaña de novedades de la web y el correo, para
+       -- saber qué se detectó en la última pasada del robot.
+       fecha_deteccion,
        cribado_veredicto, cribado_motivo
 from public.licitaciones
 where cribado_veredicto in ('si', 'quizas')
   and coalesce(estado_licitacion, '') = 'PUB'
-  and (fecha_limite is null or fecha_limite >= now())
-order by cribado_veredicto, coalesce(fecha_limite, fecha_deteccion);
+  and (
+        (fecha_limite is not null and fecha_limite >= now())
+     or (fecha_limite is null
+         and fecha_actualizacion >= now() - interval '14 days')
+      )
+order by coalesce(fecha_limite, fecha_deteccion);
 
 
 -- ------------------------------------------------------------
@@ -260,6 +289,20 @@ alter table public.licitaciones enable row level security;
 --   set cribado_veredicto = null, cribado_motivo = null,
 --       cribado_fecha = null, cribado_version = null, cribado_modelo = null
 --   where cribado_version = 'v3';
+
+-- Qué se muestra, qué se oculta y por qué:
+--
+--   select
+--     count(*) filter (where fecha_limite >= now())        as con_plazo_vigente,
+--     count(*) filter (where fecha_limite is null
+--                        and fecha_actualizacion >= now() - interval '14 days')
+--                                                          as sin_plazo_reciente,
+--     count(*) filter (where fecha_limite is null
+--                        and fecha_actualizacion <  now() - interval '14 days')
+--                                                          as ocultas_por_antiguas,
+--     count(*) filter (where fecha_limite < now())         as ocultas_por_vencidas
+--   from public.licitaciones
+--   where cribado_veredicto in ('si','quizas') and estado_licitacion = 'PUB';
 
 -- Cobertura de campos:
 --

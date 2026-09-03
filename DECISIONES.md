@@ -552,6 +552,128 @@ mí", "Puede ser para mí"— en lugar del sistema.
 
 ---
 
+## 27. Los plazos van en hora peninsular, no en UTC
+
+**El fallo.** La web mostraba un plazo que vencía el 17 de septiembre a las
+23:59:59 como si fuera el día 18.
+
+**La causa.** CODICE publica a veces la hora sin indicar la zona. El
+conversor asumía UTC cuando faltaba, así que unas 23:59:59 españolas se
+guardaban como 23:59:59 UTC, que en España son **las 01:59 del día
+siguiente**. El desfase de dos horas caía justo por encima de medianoche.
+
+**Por qué importa más que otros fallos de este registro.** Los demás
+producían ruido o trabajo perdido. Este podía hacer que alguien preparase
+una oferta para un día en que el plazo ya estaba cerrado.
+
+**Decisión.** Sin zona explícita se asume `Europe/Madrid`, que es donde
+publica la Administración española y que gestiona sola el cambio de hora.
+Y la interfaz **fuerza la hora peninsular al mostrar**, en lugar de usar la
+del navegador: un visitante desde otro huso veía otra fecha.
+
+**Añadido.** El detalle de cada oportunidad muestra ahora la hora de cierre,
+no solo el día. Presentarse a las 23:59 o a las 09:00 no es lo mismo, y el
+dato estaba en el expediente sin usarse.
+
+---
+
+## 28. La alerta solo se envía si hay algo que contar
+
+**Decisión.** El correo diario no se envía los días sin novedades.
+
+**Motivo.** Un correo que a veces dice "hoy no hay nada" enseña a ignorar al
+remitente, y con él los días en que sí importa. El silencio también informa.
+
+**Qué es una novedad.** Lo detectado en la última pasada del robot, no lo
+detectado hoy según el calendario. Si el robot se cae un día, al volver
+detecta lo acumulado y todo eso se envía: así una avería no hace perder
+ninguna oportunidad. Es la misma definición que usa la pestaña de la web,
+para que nadie reciba por correo algo que ya vio marcado como nuevo.
+
+**Consecuencia asumida.** Tras una caída, el rótulo "hoy" abarca más de un
+día. Es deliberado: el usuario no tiene por qué saber cuándo falló el
+sistema, solo qué hay nuevo para él. Cada fila lleva su plazo, que es el
+dato que decide.
+
+**Envío.** Se manda en HTML y en texto plano a la vez. Hay clientes que no
+muestran HTML, y un correo en blanco es peor que ninguno.
+
+---
+
+## 29. Encadenar cosas independientes las hace fallar juntas
+
+**Qué pasó.** El envío del correo fue rechazado por el proveedor. Como el
+paso estaba dentro del mismo *job* que publicaba la web, el fallo tumbó el
+*job* entero y **la web no se actualizó**. El scraper había funcionado, el
+cribado había funcionado y la interfaz se había generado bien.
+
+**El coste real.** Horas viendo datos viejos en la web sin entender por qué,
+y persiguiendo un fallo de fechas que ya estaba corregido.
+
+**Decisión.** Publicar y alertar son *jobs* separados que dependen del
+scraper pero no entre sí. Si el correo falla, la web se publica igual.
+
+**Principio.** Dos resultados que pueden fallar por motivos distintos no
+deben compartir destino. Encadenarlos hace que el más frágil decida por
+todos.
+
+**Nota.** El fallo se detectó porque la ejecución terminó en rojo, que es la
+corrección introducida en la Decisión 23. Un envío fallido que acabara en
+verde habría dejado la web desactualizada durante días sin aviso.
+
+---
+
+## 30. Solo se enseña lo que se puede respaldar
+
+**El problema.** La web mostraba como abiertas licitaciones ya adjudicadas.
+El estado guardado solo se actualiza cuando el expediente reaparece en el
+feed, y no todos reaparecen. Y había filas sin plazo, guardadas antes de que
+ese campo se extrajera.
+
+**La pregunta que ordena la solución.** ¿Qué evidencia hay de que una
+licitación sigue viva?
+
+| Evidencia | Decisión |
+|---|---|
+| Plazo publicado y no vencido | Se muestra |
+| Sin plazo, pero vista en el feed hace poco | Se muestra |
+| Sin plazo y sin verse en 14 días | Se oculta |
+
+**Por qué la tercera fila es lo correcto.** No saber si algo sigue abierto no
+es lo mismo que suponer que sí. Una alerta que no sabe si la oportunidad
+existe no es una alerta.
+
+**Cómo se limpia.** No hay tarea de limpieza: la vista se recalcula en cada
+consulta y lo obsoleto desaparece solo según pasa el tiempo.
+
+**Resultado medido.** De 53 candidatas, 34 se muestran y **las 34 tienen
+plazo verificable**. Se ocultan 19 que no podían respaldarse.
+
+**Lo que sigue sin cubrir.** Un expediente que se adjudique y no vuelva a
+aparecer en el feed conservaría su plazo futuro y seguiría mostrándose. Con
+ciclos de quince días, que es lo normal en el sector, el expediente se mueve
+varias veces dentro de la ventana y el refresco lo alcanza. Es una
+probabilidad baja, no una imposibilidad.
+
+---
+
+## 31. Recortar el preámbulo jurídico de los títulos
+
+**Contexto.** Algunos órganos, sobre todo catalanes, ponen como título el
+encabezado entero del pliego: *"L'objecte del present contracte és la
+prestació del servei de..."* seguido de un párrafo con fines y objetivos.
+
+**Decisión.** Se recorta el preámbulo —idéntico en todos y sin capacidad de
+distinguir un contrato de otro— y se corta por la primera frase o por
+palabra entera. El título original se conserva y se muestra completo al
+desplegar la oportunidad.
+
+**Trampa encontrada al implementarlo.** El prefijo debe terminar en límite de
+palabra. Sin esa comprobación, *"la prestació de"* recortaba dentro de *"la
+prestació dels serveis"* y se comía una letra.
+
+---
+
 ## Deuda técnica anotada
 
 Cosas conocidas que se decidió no hacer, y por qué.
@@ -568,3 +690,6 @@ Cosas conocidas que se decidió no hacer, y por qué.
 | Refrescar el estado de las filas antiguas | Solo se refresca lo que reaparece en la ventana adaptativa |
 | Plazo ausente en lo detectado antes del 24 de agosto | Se resuelve solo según vencen esos expedientes |
 | Fecha real de publicación al 26,8 % | Exigiría descargar el CallForTenders de cada expediente |
+| Verificación de un expediente concreto sin esperar al feed | 3-4 h. Cierra el último hueco de estados obsoletos |
+| Histórico de cambios de estado | Hoy se sobrescribe. Impide saber cuándo se adjudicó algo |
+| Registro de usuarios y suscripciones | 40-60 h. Convierte la herramienta en producto |
