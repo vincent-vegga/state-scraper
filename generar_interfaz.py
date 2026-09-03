@@ -126,6 +126,62 @@ def obtener_cliente():
         sys.exit(1)
 
 
+# Algunos órganos, sobre todo catalanes, ponen como título el encabezado
+# entero del pliego: un párrafo con el objeto, los fines y los objetivos.
+# En una lista se lee mal, así que se recorta el preámbulo jurídico, que
+# es idéntico en todos y no distingue un contrato de otro.
+_ARRANQUES = (
+    "l'objecte del present contracte és la prestació del servei de",
+    "l'objecte del present contracte és la prestació de",
+    "l'objecte del present contracte és el",
+    "l'objecte del present contracte és la",
+    "l'objecte d'aquest contracte el constitueix el",
+    "l'objecte d'aquest contracte és",
+    "el present contracte té per objecte la prestació de",
+    "el present contracte té per objecte",
+    "es objeto del presente contrato la prestación del servicio de",
+    "es objeto del presente contrato la",
+    "es objeto del presente contrato el",
+    "el objeto del presente contrato es la prestación de",
+    "el objeto del presente contrato es",
+    "constituye el objeto del presente contrato la",
+    "constituye el objeto del presente contrato",
+)
+LARGO_MAXIMO = 160
+
+
+def acortar(titulo: str) -> str:
+    """
+    Deja el título en algo legible sin perder de qué va el contrato.
+
+    Quita el preámbulo jurídico, corta por la primera frase si cae en un
+    sitio razonable y, si aún es largo, por palabra entera. El prefijo
+    debe acabar en límite de palabra: si no, "la prestació de" recortaba
+    dentro de "la prestació dels serveis" y se comía una letra.
+    """
+    limpio = " ".join((titulo or "").split())
+    bajo = limpio.lower()
+    for arranque in sorted(_ARRANQUES, key=len, reverse=True):
+        if not bajo.startswith(arranque):
+            continue
+        siguiente = limpio[len(arranque):len(arranque) + 1]
+        if siguiente and siguiente not in " :,;":
+            continue
+        limpio = limpio[len(arranque):].lstrip(" :,;")
+        if limpio:
+            limpio = limpio[0].upper() + limpio[1:]
+        break
+
+    if len(limpio) <= LARGO_MAXIMO:
+        return limpio
+
+    punto = limpio.find(". ")
+    if 40 <= punto <= LARGO_MAXIMO:
+        return limpio[:punto + 1]
+
+    return limpio[:LARGO_MAXIMO].rsplit(" ", 1)[0].rstrip(" ,;:.") + "…"
+
+
 def dias_hasta(fecha_iso: str | None) -> int | None:
     """Días que quedan hasta el plazo. None si no hay fecha publicada."""
     if not fecha_iso:
@@ -192,7 +248,9 @@ def preparar(filas: list[dict]) -> list[dict]:
                 cpvs = []
 
         preparadas.append({
-            "titulo": fila.get("titulo") or "(sin título)",
+            "titulo": acortar(fila.get("titulo") or "") or "(sin título)",
+            # El original se conserva: en el detalle interesa entero.
+            "titulo_completo": " ".join((fila.get("titulo") or "").split()),
             # Necesario para separar las novedades. Es la fecha en que el
             # robot la vio por primera vez, no la de publicación.
             "deteccion": fila.get("fecha_deteccion"),
@@ -522,19 +580,42 @@ const DATOS = PAQUETE.oportunidades;
 const STATS = PAQUETE.stats || {};
 const MESES = ['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic'];
 
+// Todas las fechas se muestran en hora peninsular, sea cual sea la del
+// visitante. Un plazo que vence a las 23:59:59 en España aparecería un día
+// después para quien lo consulte desde un huso más al este, y alguien
+// podría presentarse tarde por eso.
+const ZONA = 'Europe/Madrid';
+const partes = (iso) => {
+  const f = new Intl.DateTimeFormat('es-ES', {
+    timeZone: ZONA, day:'numeric', month:'numeric', year:'numeric',
+    hour:'2-digit', minute:'2-digit',
+  }).formatToParts(new Date(iso));
+  const v = {};
+  f.forEach(p => v[p.type] = p.value);
+  return v;
+};
+
 const num = n => new Intl.NumberFormat('es-ES').format(n);
 const euros = n => n == null ? 'sin importe'
   : new Intl.NumberFormat('es-ES',{style:'currency',currency:'EUR',maximumFractionDigits:0}).format(n);
 const fechaLarga = s => s ? new Date(s).toLocaleDateString('es-ES',
-  {day:'numeric',month:'long',year:'numeric'}) : '—';
+  {timeZone:ZONA, day:'numeric', month:'long', year:'numeric'}) : '—';
+
+// El plazo lleva la hora: presentarse a las 23:59 o a las 09:00 del mismo
+// día no es lo mismo, y el dato está en el expediente.
+const plazoLargo = s => {
+  if(!s) return 'sin plazo publicado';
+  const p = partes(s);
+  return `${fechaLarga(s)}, a las ${p.hour}:${p.minute} (hora peninsular)`;
+};
 
 function bloqueFecha(o){
   if(o.dias == null) return `<div class="fecha sinplazo"><span class="dia">Sin plazo publicado</span></div>`;
-  const d = new Date(o.limite);
+  const p = partes(o.limite);
   const cuenta = o.dias < 0 ? 'vencido' : o.dias === 0 ? 'vence hoy' :
                  o.dias === 1 ? 'queda 1 día' : `quedan ${o.dias} días`;
   return `<div class="fecha ${o.dias <= 7 ? 'apura' : ''}">
-    <span class="dia">${d.getDate()} ${MESES[d.getMonth()]}</span>
+    <span class="dia">${p.day} ${MESES[+p.month - 1]}</span>
     <span class="cuenta">${cuenta}</span></div>`;
 }
 
@@ -542,10 +623,12 @@ function detalle(o, i){
   return `<section class="detalle" id="d${i}">
     ${o.motivo ? `<p class="cita">${o.motivo}</p>` : ''}
     <dl>
+      ${o.titulo_completo && o.titulo_completo !== o.titulo
+        ? `<dt>Objeto completo</dt><dd>${o.titulo_completo}</dd>` : ''}
       <dt>Órgano</dt><dd>${o.organo || '—'}</dd>
       <dt>Provincia</dt><dd>${o.provincia || 'no informada'}</dd>
       <dt>Presupuesto</dt><dd>${euros(o.presupuesto)}</dd>
-      <dt>Plazo</dt><dd>${fechaLarga(o.limite)}</dd>
+      <dt>Plazo</dt><dd>${plazoLargo(o.limite)}</dd>
       <dt>Publicado</dt><dd>${fechaLarga(o.publicacion)}</dd>
       <dt>Códigos CPV</dt><dd>${o.cpvs.length ? o.cpvs.join(', ') : '—'}</dd>
     </dl>

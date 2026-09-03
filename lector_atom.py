@@ -221,6 +221,18 @@ def a_numero(valor: str | None) -> float | None:
         return None
 
 
+# Zona horaria de referencia. Los plazos de la contratación española se
+# publican en hora peninsular, y CODICE a veces omite el desfase. Asumir
+# UTC en ese caso desplaza el plazo dos horas en verano: unas 23:59:59 se
+# convertían en las 01:59 del día SIGUIENTE, y la web mostraba un día de
+# más. Alguien podría presentarse tarde por eso.
+try:
+    from zoneinfo import ZoneInfo
+    ZONA_ESPANA = ZoneInfo("Europe/Madrid")
+except Exception:            # sin base de datos de zonas horarias
+    ZONA_ESPANA = timezone.utc
+    logging.warning("Sin zona horaria Europe/Madrid: se usará UTC.")
+
 # CODICE publica las fechas en el formato `date` de XML Schema, que admite
 # zona horaria SIN hora: "2026-06-09+02:00". Es legal y correcto, pero ni
 # dateutil ni la librería estándar lo interpretan, así que hay que insertar
@@ -256,8 +268,10 @@ def a_fecha(valor: str | None) -> datetime | None:
         fecha = parser_fechas.parse(texto)
     except (ValueError, OverflowError, TypeError):
         return None
+    # Sin zona explícita se asume hora peninsular, NO UTC: es la zona en
+    # la que publica la Administración española.
     if fecha.tzinfo is None:
-        fecha = fecha.replace(tzinfo=timezone.utc)
+        fecha = fecha.replace(tzinfo=ZONA_ESPANA)
     return fecha
 
 

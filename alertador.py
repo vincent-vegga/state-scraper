@@ -109,6 +109,15 @@ def obtener_cliente():
         sys.exit(1)
 
 
+# Los plazos españoles se publican en hora peninsular. Asumir UTC cuando
+# falta la zona desplaza un vencimiento de las 23:59 al día siguiente.
+try:
+    from zoneinfo import ZoneInfo
+    ZONA_ESPANA = ZoneInfo("Europe/Madrid")
+except Exception:
+    ZONA_ESPANA = timezone.utc
+
+
 def a_fecha(valor: str | None) -> datetime | None:
     if not valor:
         return None
@@ -116,7 +125,7 @@ def a_fecha(valor: str | None) -> datetime | None:
         fecha = datetime.fromisoformat(valor.replace("Z", "+00:00"))
     except ValueError:
         return None
-    return fecha if fecha.tzinfo else fecha.replace(tzinfo=timezone.utc)
+    return fecha if fecha.tzinfo else fecha.replace(tzinfo=ZONA_ESPANA)
 
 
 def novedades(cliente) -> list[dict]:
@@ -159,15 +168,78 @@ def euros(valor) -> str:
 
 
 def dias_restantes(limite: str | None) -> str:
+    """Días restantes y hora exacta de cierre, en hora peninsular."""
     fecha = a_fecha(limite)
     if not fecha:
         return "sin plazo publicado"
+    local = fecha.astimezone(ZONA_ESPANA)
     dias = (fecha - datetime.now(timezone.utc)).days
+    cuando = local.strftime("%d/%m a las %H:%M")
     if dias < 0:
-        return "vencido"
+        return f"vencido ({cuando})"
     if dias == 0:
-        return "vence hoy"
-    return "queda 1 día" if dias == 1 else f"quedan {dias} días"
+        return f"vence hoy, {local.strftime('%H:%M')}"
+    plazo = "queda 1 día" if dias == 1 else f"quedan {dias} días"
+    return f"{plazo} · hasta el {cuando}"
+
+
+# Algunos órganos, sobre todo catalanes, ponen como título el encabezado
+# entero del pliego: un párrafo con el objeto, los fines y hasta los
+# objetivos del contrato. En una lista se lee mal; en un correo, peor.
+_ARRANQUES = (
+    "l'objecte del present contracte és la prestació del servei de",
+    "l'objecte del present contracte és la prestació de",
+    "l'objecte del present contracte és el",
+    "l'objecte del present contracte és la",
+    "l'objecte d'aquest contracte el constitueix el",
+    "l'objecte d'aquest contracte és",
+    "el present contracte té per objecte la prestació de",
+    "el present contracte té per objecte",
+    "es objeto del presente contrato la prestación del servicio de",
+    "es objeto del presente contrato la",
+    "es objeto del presente contrato el",
+    "el objeto del presente contrato es la prestación de",
+    "el objeto del presente contrato es",
+    "constituye el objeto del presente contrato la",
+    "constituye el objeto del presente contrato",
+)
+LARGO_MAXIMO = 130
+
+
+def acortar(titulo: str) -> str:
+    """
+    Deja el título en algo legible sin perder de qué va el contrato.
+
+    Primero quita el preámbulo jurídico ("l'objecte del present contracte
+    és..."), que no aporta nada y se repite igual en todos. Después corta
+    por la primera frase, y si aún es largo, por palabra entera.
+    """
+    limpio = " ".join((titulo or "").split())
+    bajo = limpio.lower()
+    # Se prueban de más largo a más corto, y el prefijo debe terminar en
+    # límite de palabra: si no, "la prestació de" recortaba dentro de "la
+    # prestació dels serveis" y se comía una letra.
+    for arranque in sorted(_ARRANQUES, key=len, reverse=True):
+        if not bajo.startswith(arranque):
+            continue
+        siguiente = limpio[len(arranque):len(arranque) + 1]
+        if siguiente and siguiente not in " :,;":
+            continue
+        limpio = limpio[len(arranque):].lstrip(" :,;")
+        if limpio:
+            limpio = limpio[0].upper() + limpio[1:]
+        break
+
+    if len(limpio) <= LARGO_MAXIMO:
+        return limpio
+
+    # Cortar por el final de la primera frase, si cae en un sitio razonable.
+    punto = limpio.find(". ")
+    if 40 <= punto <= LARGO_MAXIMO:
+        return limpio[:punto + 1]
+
+    corte = limpio[:LARGO_MAXIMO].rsplit(" ", 1)[0]
+    return corte.rstrip(" ,;:.") + "…"
 
 
 def provincia_de(codigo_postal: str | None) -> str:
@@ -193,7 +265,7 @@ def componer(items: list[dict]) -> tuple[str, str, str]:
         # Se escapa UNA sola vez, al insertar en la plantilla. Escapar el
         # órgano aquí y el contexto después convertía "X & Y" en
         # "X &amp;amp; Y" en el correo.
-        titulo = it.get("titulo") or "(sin título)"
+        titulo = acortar(it.get("titulo") or "") or "(sin título)"
         organo = it.get("organo") or ""
         prov = provincia_de(it.get("codigo_postal"))
         plazo = dias_restantes(it.get("fecha_limite"))
