@@ -361,8 +361,16 @@ def enviar(asunto: str, cuerpo_html: str, cuerpo_texto: str,
 
     peticion = urllib.request.Request(
         API_RESEND, data=cuerpo, method="POST",
-        headers={"Authorization": f"Bearer {clave}",
-                 "Content-Type": "application/json"},
+        headers={
+            "Authorization": f"Bearer {clave}",
+            "Content-Type": "application/json",
+            # Sin User-Agent, la petición sale identificándose como
+            # urllib y el cortafuegos que hay delante de la API la
+            # rechaza con un 403 antes de que llegue a Resend. El
+            # intento ni siquiera aparece en su panel.
+            "User-Agent": "StateScraper/1.0 (alertas de contratacion publica)",
+            "Accept": "application/json",
+        },
     )
 
     try:
@@ -372,8 +380,17 @@ def enviar(asunto: str, cuerpo_html: str, cuerpo_texto: str,
                          datos.get("id", "desconocido"))
             return True
     except urllib.error.HTTPError as error:
-        detalle = error.read().decode("utf-8", "replace")[:400]
-        logging.error("Resend rechazó el envío (%s): %s", error.code, detalle)
+        detalle = error.read().decode("utf-8", "replace")[:600]
+        logging.error("Resend rechazó el envío (HTTP %s): %s", error.code, detalle)
+        if error.code == 403:
+            logging.error(
+                "Un 403 suele ser una de estas tres: la clave no tiene "
+                "permiso de envío; el destinatario no es la dirección con "
+                "la que te registraste (obligatorio sin dominio propio); o "
+                "la petición fue bloqueada antes de llegar a la API."
+            )
+        elif error.code == 422:
+            logging.error("Un 422 apunta al remitente o al destinatario.")
         return False
     except Exception as error:
         logging.error("No se pudo enviar el correo: %s", error)
@@ -422,8 +439,12 @@ def main() -> int:
         logging.error("Falta DESTINATARIOS_ALERTA. Sin destino no hay alerta.")
         return 1
 
-    logging.info("Enviando a %d destinatario(s) desde %s.",
-                 len(destinatarios), REMITENTE)
+    # Se enmascara el destinatario: el registro de Actions es público en
+    # un repositorio público, pero hace falta ver si la dirección es la
+    # que se espera.
+    visibles = [d[:2] + "***@" + d.split("@")[-1] if "@" in d else "???"
+                for d in destinatarios]
+    logging.info("Enviando desde %s a: %s", REMITENTE, ", ".join(visibles))
 
     if not enviar(asunto, cuerpo_html, cuerpo_texto, destinatarios):
         # Fallar en rojo: un envío fallido que termina en verde es
