@@ -314,6 +314,145 @@ que no toleraría es prometerla.
 
 ---
 
+## 15. El pipeline no va del 1 al 5: el cribado semántico se adelanta
+
+**Contexto.** El diseño original era secuencial: descargar pliegos (3),
+analizarlos con LLM (4), alertar (5).
+
+**El problema.** La Decisión 11 estableció que el CPV no discrimina y que la
+precisión la aporta el análisis semántico. Pero para separar un concierto de
+una corrida de toros **no hace falta el pliego**: basta con título, órgano y
+CPV, que ya están en la tabla. Descargar cientos de PDF para después
+descartar cinco de cada seis es trabajo tirado.
+
+**Decisión.** El paso 4 se parte en dos y el orden real queda:
+
+```
+1 → 2 → 4a (cribado barato) → 3 (descarga) → 4b (extracción) → 5 (alerta)
+```
+
+**Motivo.** Reduce el volumen de descarga en un factor de cinco o seis, y con
+él el almacenamiento, el tiempo de ejecución y la probabilidad de toparse con
+PDF escaneados que exigirían OCR.
+
+**Consecuencia más valiosa que el ahorro.** Con 4a hecho ya hay producto
+demostrable **sin tocar un solo PDF**: título, órgano, presupuesto, CPV y
+enlace, filtrados semánticamente, son una alerta útil.
+
+**Salvaguarda obligatoria.** El cribado **no puede ser binario**. Si descarta
+en binario, lo descartado no vuelve a mirarse nunca y nadie se entera, lo que
+rompe la asimetría de la Decisión 11: una llamada al modelo cuesta céntimos y
+una oportunidad perdida cuesta un cliente. El cribado tiene tres salidas —
+`sí`, `quizás`, `no` — y `quizás` también pasa al usuario.
+
+---
+
+## 16. Los pliegos no se archivan
+
+**Contexto.** El robot corre en una máquina de GitHub que se destruye al
+terminar cada ejecución, y la Decisión 5 prohíbe guardar datos en el
+repositorio.
+
+**Decisión.** Se descarga, se extrae el texto, se analiza y se descarta el
+fichero. Se conserva el resultado del análisis y la URL.
+
+**Motivo.** Los pliegos siguen publicados en el portal oficial, así que
+archivarlos duplica algo que ya existe.
+
+**Riesgo asumido conscientemente.** Un pliego puede modificarse o retirarse
+durante la licitación. **Se asume que no cambia tras su publicación.**
+Mitigación disponible y no aplicada: el feed trae un `DocumentHash` de cada
+documento, así que se podría detectar una modificación sin archivar nada.
+
+---
+
+## 17. Un expediente tiene N documentos: hace falta una tabla aparte
+
+**Contexto.** La tabla `licitaciones` tiene una columna `enlace`, lo que
+asume un documento por licitación.
+
+**El problema.** Es falso. Un expediente incluye como mínimo pliego de
+cláusulas administrativas y pliego de prescripciones técnicas, y
+habitualmente anexos y cuadro de características. Medido: **3,6 documentos de
+media**.
+
+**Decisión.** Tabla `documentos`, una fila por documento, con clave ajena a
+`licitaciones`. Pendiente de construir: los pasos 3 y 4b siguen sin hacerse.
+
+**Consecuencia sobre el estado del pipeline.** Cada documento tendrá su
+propio estado de descarga, y una licitación no estará analizada hasta que lo
+estén los suyos.
+
+---
+
+## 18. El feed trae plazo y URLs de documentos: el paso 3 deja de ser crítico
+
+**Contexto.** El diseño asumía que la fecha límite y el acceso a los pliegos
+exigían descargar y analizar documentos. El paso 3 era el más incierto del
+pipeline, estimado entre 3 y 8 horas.
+
+**Lo que dijeron los datos.** Medido en modo diagnóstico sobre licitaciones
+reales:
+
+| Dato | Cobertura |
+|---|---|
+| Fecha límite de presentación | 95,0 % |
+| Al menos un documento referenciado | 90,5 % |
+| Documentos por licitación | 3,6 de media |
+
+Y las URLs de descarga **funcionan en ventana de incógnito**: son
+autocontenidas, sin identificador de sesión ni token temporal.
+
+**Consecuencias.** Se puede emitir una alerta completa sin descargar nada, y
+el paso 3 pasa de cuello de botella a trámite.
+
+**Detalles del esquema CODICE.** Cada tipo de documento cuelga de un nodo
+distinto: `LegalDocumentReference` (cláusulas administrativas),
+`TechnicalDocumentReference` (prescripciones técnicas) y
+`AdditionalDocumentReference` (anexos). La dirección vive dentro de
+`Attachment > ExternalReference > URI`.
+
+**Detalle del plazo.** Los procedimientos restringidos no publican plazo de
+ofertas sino de solicitudes de participación, en un nodo distinto. Buscar
+solo el primero habría dejado esos expedientes como "sin fecha".
+
+---
+
+## 19. El feed no da para una alerta: da para un informe
+
+**Contexto.** Quedaba la duda de cuánto del contenido del pliego estaba ya
+volcado en campos estructurados. La hipótesis del arquitecto era que
+`TenderingTerms` vendría "relleno pero incompleto", porque el primer
+expediente inspeccionado tenía la solvencia rellena con una remisión: *"Al
+menos uno de los medios indicados en el apartado 2.2 de la Cláusula 8ª del
+Pliego"*.
+
+**Los datos desmintieron la hipótesis.** Medido sobre 312 licitaciones:
+
+| Dato | Cobertura |
+|---|---|
+| Email de contacto del órgano | 92,6 % |
+| Con criterios de adjudicación | 86,5 % |
+| Criterios con ponderación numérica | **100 %** (1.227/1.227) |
+| Ponderaciones que suman 100 | 85,2 % |
+| Con requisitos de solvencia | 83,7 % |
+| Campos de solvencia **con contenido real** | **76,8 %** |
+| Garantía definitiva | 40,1 % |
+
+El expediente que motivó la hipótesis estaba en el 23 % que remite al pliego.
+Generalizar desde una muestra de uno fue el error.
+
+**Decisión.** El paso 3 deja de ser incondicional. **La detección de
+remisiones pasa de métrica a disparador:** solo se descarga el pliego cuando
+el campo de solvencia remite a él. Tres de cada cuatro licitaciones no
+necesitan descarga alguna.
+
+**Hallazgo de producto no previsto.** El email del órgano viene en el 92,6 %
+de los casos. Convierte la alerta en acción inmediata: no solo "existe esta
+oportunidad", sino "y este es el correo de quien la convoca".
+
+---
+
 ## 20. El estado del expediente es el filtro más rentable de todos
 
 **Contexto.** El sistema alertaba de contratos "nuevos" que en realidad
